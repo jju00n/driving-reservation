@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: driving-reservation
+  profiles:
+    active: local
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  security:
+    user:
+      name: admin
+
+jwt:
+  secret: ${JWT_SECRET:local-dev-secret-key-must-be-at-least-256-bits-long}
+  expiration: 3600000        # 1시간 (ms)
+  refresh-expiration: 604800000  # 7일 (ms)
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /api-docs
+
+reservation:
+  payment-pending-ttl-minutes: 60  # 결제 대기 만료 시간
