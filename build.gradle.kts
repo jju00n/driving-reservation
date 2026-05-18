@@ -9,7 +9,7 @@ version = "0.0.1-SNAPSHOT"
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(21)
     }
 }
 
@@ -35,9 +35,8 @@ dependencies {
     // Swagger
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.6")
 
-    // Resilience4j
-    implementation("io.github.resilience4j:resilience4j-spring-boot3:2.3.0")
-    implementation("org.springframework.boot:spring-boot-starter-aop")
+    // Resilience4j (결제 서킷브레이커 구현 시 추가 예정)
+    // implementation("io.github.resilience4j:resilience4j-spring-boot3:2.3.0")
 
     // Test
     testImplementation("org.springframework.boot:spring-boot-starter-test")
