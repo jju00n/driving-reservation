@@ -224,6 +224,7 @@ ApiResponse.fail("에러 메시지")
 |------|------|------|
 | vehicle_idx | BIGINT | PK, AUTO_INCREMENT |
 | name | VARCHAR(100) | |
+| model | VARCHAR(100) | |
 | created_at | DATETIME | |
 | updated_at | DATETIME | |
 
@@ -262,7 +263,7 @@ ApiResponse.fail("에러 메시지")
 | order_id | VARCHAR(64) | UNIQUE (토스 orderId) |
 | amount | BIGINT | |
 | status | VARCHAR(20) | ReservationStatus |
-| reserved_at | DATETIME | |
+| reserved_at | DATETIME | NOT NULL |
 | created_at | DATETIME | |
 | updated_at | DATETIME | |
 
@@ -290,16 +291,17 @@ ApiResponse.fail("에러 메시지")
 | status | VARCHAR(20) | 상태 스냅샷 |
 | created_at | DATETIME | |
 
-### webhook_events (멘토 피드백 반영)
+### webhook_events
 | 컬럼 | 타입 | 비고 |
 |------|------|------|
 | webhook_event_idx | BIGINT | PK, AUTO_INCREMENT |
 | event_type | VARCHAR(50) | PAYMENT_STATUS_CHANGED / CANCEL_STATUS_CHANGED |
-| order_id | VARCHAR(64) | nullable |
-| payment_key | VARCHAR(200) | nullable |
+| order_id | VARCHAR(64) | nullable, INDEX (payments/reservations 조회용) |
 | raw_payload | TEXT | 토스 웹훅 원문 JSON |
 | status | VARCHAR(20) | RECEIVED / PROCESSED / FAILED |
 | created_at | DATETIME | |
+
+> FK 없음 — 웹훅은 예외 상황 대비 안전망이므로 참조 무결성보다 유연성 우선. order_id로 payments/reservations 조회.
 
 ## 인덱스 설계 (멘토 피드백 반영)
 

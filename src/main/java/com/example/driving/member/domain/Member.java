@@ -30,12 +30,15 @@ public class Member {
     private LocalDateTime deletedAt;
 
     public static Member create(String email, String encodedPassword, String encryptedName, String encryptedPhone) {
+        LocalDateTime now = LocalDateTime.now();
         return Member.builder()
                 .email(email)
                 .password(encodedPassword)
                 .name(encryptedName)
                 .phone(encryptedPhone)
                 .role(Role.CUSTOMER)
+                .createdAt(now)
+                .updatedAt(now)
                 .build();
     }
 

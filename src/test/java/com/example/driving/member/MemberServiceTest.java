@@ -16,14 +16,17 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.util.Date;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.verify;
 
@@ -41,6 +44,10 @@ class MemberServiceTest {
     private AesEncryptUtil aesEncryptUtil;
     @Mock
     private JwtProvider jwtProvider;
+    @Mock
+    private StringRedisTemplate stringRedisTemplate;
+    @Mock
+    private ValueOperations<String, String> valueOperations;
 
     @Test
     @DisplayName("회원가입 성공")
@@ -83,11 +90,13 @@ class MemberServiceTest {
         given(passwordEncoder.matches(request.password(), member.getPassword())).willReturn(true);
         given(jwtProvider.createAccessToken(any(), any())).willReturn("access-token");
         given(jwtProvider.createRefreshToken(any())).willReturn("refresh-token");
+        given(stringRedisTemplate.opsForValue()).willReturn(valueOperations);
 
         LoginResponse response = memberService.login(request);
 
         assertThat(response.accessToken()).isEqualTo("access-token");
         assertThat(response.refreshToken()).isEqualTo("refresh-token");
+        verify(valueOperations).set(eq("refresh:" + member.getMemberIdx()), eq("refresh-token"), eq(7L), eq(TimeUnit.DAYS));
     }
 
     @Test
@@ -119,5 +128,22 @@ class MemberServiceTest {
         assertThatThrownBy(() -> memberService.login(request))
                 .isInstanceOf(BusinessException.class)
                 .hasMessage("이메일 또는 비밀번호가 올바르지 않습니다.");
+    }
+
+    @Test
+    @DisplayName("로그아웃 성공")
+    void logout_success() {
+        String accessToken = "valid-access-token";
+        Long memberIdx = 1L;
+        Date expiration = new Date(System.currentTimeMillis() + 3600000);
+
+        given(jwtProvider.getMemberIdx(accessToken)).willReturn(memberIdx);
+        given(jwtProvider.getExpiration(accessToken)).willReturn(expiration);
+        given(stringRedisTemplate.opsForValue()).willReturn(valueOperations);
+
+        memberService.logout(accessToken);
+
+        verify(stringRedisTemplate).delete("refresh:" + memberIdx);
+        verify(valueOperations).set(eq("blackList:" + accessToken), eq("logout"), anyLong(), eq(TimeUnit.MILLISECONDS));
     }
 }
