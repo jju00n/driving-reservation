@@ -31,8 +31,8 @@ public class AuthController {
 
     @Operation(summary = "로그인")
     @PostMapping("/login")
-    public ApiResponse<LoginResponse> login(@Valid @RequestBody LoginRequest request) {
-        return ApiResponse.ok(memberService.login(request));
+    public LoginResponse login(@Valid @RequestBody LoginRequest request) {
+        return memberService.login(request);
     }
 
     @Operation(summary = "로그아웃")
