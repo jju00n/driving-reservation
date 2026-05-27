@@ -4,8 +4,11 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
@@ -13,6 +16,9 @@ import java.util.Date;
 
 @Component
 public class JwtProvider {
+
+    private static final String BEARER_PREFIX = "Bearer ";
+    private static final String ROLE_CLAIM = "role";
 
     private final SecretKey key;
     private final long expirationMs;
@@ -40,6 +46,18 @@ public class JwtProvider {
         return Long.parseLong(parseClaims(token).getSubject());
     }
 
+    public String getRole(String token) {
+        return parseClaims(token).get(ROLE_CLAIM, String.class);
+    }
+
+    public String resolveBearerToken(HttpServletRequest request) {
+        String bearer = request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (StringUtils.hasText(bearer) && bearer.startsWith(BEARER_PREFIX)) {
+            return bearer.substring(BEARER_PREFIX.length());
+        }
+        return null;
+    }
+
     public boolean isValid(String token) {
         try {
             parseClaims(token);
@@ -58,7 +76,7 @@ public class JwtProvider {
                 .signWith(key);
 
         if (role != null) {
-            builder.claim("role", role);
+            builder.claim(ROLE_CLAIM, role);
         }
 
         return builder.compact();
