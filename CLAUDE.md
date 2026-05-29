@@ -85,7 +85,7 @@ src/main/java/com/example/driving/
 | CONFIRMED | 예약 확정 | 결제 완료 시 |
 | PAYMENT_FAILED | 결제 실패 | 결제 실패 시 → 재고 복구 |
 | CANCELLED | 예약 취소 | 고객 취소 시 → 재고 복구 + 환불 |
-| EXPIRED | 예약 만료 | 1시간 초과 미결제 → 재고 복구 |
+| EXPIRED | 예약 만료 | 미결제 만료 → 재고 복구 (토스 만료 정책 연동, 아래 참고) |
 
 ### 결제 상태 (PaymentStatus)
 | 상태 | 설명 |
@@ -125,6 +125,27 @@ src/main/java/com/example/driving/
 [5] 백엔드 → amount 위변조 검증 → 토스 confirm API 호출
 [6] 성공: CONFIRMED, 실패: PAYMENT_FAILED + 재고 복구
 ```
+
+## 미결제 만료 정책 (EXPIRED)
+
+토스 결제 유효시간과 우리 예약 만료 정책을 **30분 기준으로 일치**시킨다.
+
+**토스 만료 메커니즘 (2단계 타이머):**
+- ① 결제창 인증: **30분** 안에 고객이 결제창에서 인증하지 않으면 `EXPIRED`
+- ② 승인 대기: 인증 후(IN_PROGRESS) **10분** 안에 상점이 confirm API를 호출하지 않으면 `EXPIRED`
+- 만료 시 토스가 `PAYMENT_STATUS_CHANGED` 웹훅 발송 (`data.status == EXPIRED`)
+
+**핵심:** 토스가 결제를 EXPIRED 처리해도 **우리 DB의 예약/재고는 자동으로 풀리지 않는다.** 우리 쪽 만료 처리가 반드시 필요.
+
+**처리 전략 (웹훅 1차 + 스케줄러 안전망):**
+| 경로 | 동작 |
+|------|------|
+| 1차: 토스 웹훅 | `PAYMENT_STATUS_CHANGED` 수신 → `data.status == EXPIRED` → `data.orderId`로 예약 조회 → `expire()` + 재고 복구 (실시간) |
+| 2차: 스케줄러 (안전망) | `reservedAt + 40분`(토스 30+10분보다 여유) 초과 PAYMENT_PENDING 건 청소. 웹훅 유실/서버 다운 중 미수신 대비 |
+
+**멱등성:** `webhook_events.order_id` 중복 체크 + `Reservation.expire()`의 상태 가드(`isPaymentPending()`)로 중복 재고 복구 방지.
+
+> 상세 흐름은 `docs/payment-sequence.md` 참고.
 
 ## 분산락 전략
 
