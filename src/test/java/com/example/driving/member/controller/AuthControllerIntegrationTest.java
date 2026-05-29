@@ -4,6 +4,8 @@ import com.example.driving.member.domain.Member;
 import com.example.driving.member.dto.LoginRequest;
 import com.example.driving.member.dto.SignupRequest;
 import com.example.driving.member.repository.MemberRepository;
+import com.example.driving.reservation.repository.ReservationHistoryRepository;
+import com.example.driving.reservation.repository.ReservationRepository;
 import com.example.driving.support.AbstractIntegrationTest;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -39,8 +41,16 @@ class AuthControllerIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
+    @Autowired
+    private ReservationHistoryRepository reservationHistoryRepository;
+
+    @Autowired
+    private ReservationRepository reservationRepository;
+
     @BeforeEach
     void cleanup() {
+        reservationHistoryRepository.deleteAll();
+        reservationRepository.deleteAll();
         memberRepository.deleteAll();
         stringRedisTemplate.getConnectionFactory().getConnection().serverCommands().flushDb();
     }

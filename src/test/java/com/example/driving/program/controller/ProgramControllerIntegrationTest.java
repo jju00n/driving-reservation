@@ -8,6 +8,8 @@ import com.example.driving.program.enums.ScheduleStatus;
 import com.example.driving.program.repository.ProgramRepository;
 import com.example.driving.program.repository.ScheduleRepository;
 import com.example.driving.program.repository.VehicleRepository;
+import com.example.driving.reservation.repository.ReservationHistoryRepository;
+import com.example.driving.reservation.repository.ReservationRepository;
 import com.example.driving.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -35,8 +37,16 @@ class ProgramControllerIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private ScheduleRepository scheduleRepository;
 
+    @Autowired
+    private ReservationHistoryRepository reservationHistoryRepository;
+
+    @Autowired
+    private ReservationRepository reservationRepository;
+
     @BeforeEach
     void cleanup() {
+        reservationHistoryRepository.deleteAll();
+        reservationRepository.deleteAll();
         scheduleRepository.deleteAll();
         programRepository.deleteAll();
         vehicleRepository.deleteAll();
