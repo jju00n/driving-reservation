@@ -1,0 +1,251 @@
+package com.example.driving.reservation;
+
+import com.example.driving.common.exception.BusinessException;
+import com.example.driving.member.domain.Member;
+import com.example.driving.member.enums.Role;
+import com.example.driving.member.repository.MemberRepository;
+import com.example.driving.program.domain.Program;
+import com.example.driving.program.domain.Schedule;
+import com.example.driving.program.domain.Vehicle;
+import com.example.driving.program.enums.ProgramStatus;
+import com.example.driving.program.enums.ScheduleStatus;
+import com.example.driving.program.repository.ProgramRepository;
+import com.example.driving.program.repository.ScheduleRepository;
+import com.example.driving.program.repository.VehicleRepository;
+import com.example.driving.reservation.domain.Reservation;
+import com.example.driving.reservation.dto.CreateReservationResponse;
+import com.example.driving.reservation.enums.ReservationStatus;
+import com.example.driving.reservation.repository.ReservationHistoryRepository;
+import com.example.driving.reservation.repository.ReservationRepository;
+import com.example.driving.reservation.service.ReservationService;
+import com.example.driving.support.AbstractIntegrationTest;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+@DisplayName("예약 신청 통합 테스트 - 분산락 동시성")
+class ReservationConcurrencyIntegrationTest extends AbstractIntegrationTest {
+
+    @Autowired
+    private ReservationService reservationService;
+
+    @Autowired
+    private MemberRepository memberRepository;
+    @Autowired
+    private VehicleRepository vehicleRepository;
+    @Autowired
+    private ProgramRepository programRepository;
+    @Autowired
+    private ScheduleRepository scheduleRepository;
+    @Autowired
+    private ReservationRepository reservationRepository;
+    @Autowired
+    private ReservationHistoryRepository reservationHistoryRepository;
+
+    private Long programIdx;
+
+    @BeforeEach
+    void cleanup() {
+        reservationHistoryRepository.deleteAll();
+        reservationRepository.deleteAll();
+        scheduleRepository.deleteAll();
+        programRepository.deleteAll();
+        vehicleRepository.deleteAll();
+        memberRepository.deleteAll();
+
+        LocalDateTime now = LocalDateTime.now();
+        Vehicle vehicle = vehicleRepository.save(Vehicle.builder()
+                .name("BMW").model("M3").createdAt(now).updatedAt(now).build());
+        Program program = programRepository.save(Program.builder()
+                .vehicleIdx(vehicle.getVehicleIdx())
+                .name("M3 드라이빙 체험")
+                .duration(60).amount(150_000L)
+                .status(ProgramStatus.ACTIVE)
+                .createdAt(now).updatedAt(now)
+                .build());
+        this.programIdx = program.getProgramIdx();
+    }
+
+    private Long createSchedule(int capacity, int remaining, ScheduleStatus status) {
+        LocalDateTime now = LocalDateTime.now();
+        return scheduleRepository.save(Schedule.builder()
+                .programIdx(programIdx)
+                .startAt(now.plusDays(1))
+                .endAt(now.plusDays(1).plusHours(1))
+                .capacity(capacity).remaining(remaining)
+                .status(status)
+                .createdAt(now).updatedAt(now)
+                .build()).getScheduleIdx();
+    }
+
+    private List<Long> createMembers(int count) {
+        LocalDateTime now = LocalDateTime.now();
+        List<Long> ids = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            Member m = memberRepository.save(Member.builder()
+                    .email("user" + i + "@test.com")
+                    .password("encoded")
+                    .name("user" + i)
+                    .phone("01000000000")
+                    .role(Role.CUSTOMER)
+                    .createdAt(now).updatedAt(now)
+                    .build());
+            ids.add(m.getMemberIdx());
+        }
+        return ids;
+    }
+
+    @Test
+    @DisplayName("단일 요청 - 정상 예약, 재고 1 차감, History 1건 생성")
+    void create_single_success() {
+        Long scheduleIdx = createSchedule(5, 5, ScheduleStatus.OPEN);
+        Long memberIdx = createMembers(1).get(0);
+
+        CreateReservationResponse response = reservationService.create(memberIdx, programIdx, scheduleIdx);
+
+        assertThat(response.reservationIdx()).isNotNull();
+        assertThat(response.orderId()).isNotBlank();
+        assertThat(response.amount()).isEqualTo(150_000L);
+
+        Schedule after = scheduleRepository.findById(scheduleIdx).orElseThrow();
+        assertThat(after.getRemaining()).isEqualTo(4);
+
+        Reservation saved = reservationRepository.findByOrderId(response.orderId()).orElseThrow();
+        assertThat(saved.getStatus()).isEqualTo(ReservationStatus.PAYMENT_PENDING);
+        assertThat(reservationHistoryRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("동시 10명이 capacity=5 스케줄에 예약 시도 - 정확히 5명만 성공")
+    void create_concurrent_capacity_limit() throws InterruptedException {
+        int capacity = 5;
+        int threadCount = 10;
+
+        Long scheduleIdx = createSchedule(capacity, capacity, ScheduleStatus.OPEN);
+        List<Long> members = createMembers(threadCount);
+
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch doneGate = new CountDownLatch(threadCount);
+
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicInteger failCount = new AtomicInteger();
+        AtomicReference<Throwable> unexpectedError = new AtomicReference<>();
+
+        for (int i = 0; i < threadCount; i++) {
+            final Long memberIdx = members.get(i);
+            executor.submit(() -> {
+                try {
+                    startGate.await();
+                    reservationService.create(memberIdx, programIdx, scheduleIdx);
+                    successCount.incrementAndGet();
+                } catch (BusinessException e) {
+                    failCount.incrementAndGet();
+                } catch (Throwable t) {
+                    unexpectedError.compareAndSet(null, t);
+                } finally {
+                    doneGate.countDown();
+                }
+            });
+        }
+
+        startGate.countDown();
+        boolean finished = doneGate.await(30, TimeUnit.SECONDS);
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
+
+        if (unexpectedError.get() != null) {
+            throw new AssertionError("의도치 않은 예외 발생", unexpectedError.get());
+        }
+        assertThat(finished).as("모든 스레드가 30초 안에 종료되어야 함").isTrue();
+        assertThat(successCount.get()).as("정원만큼만 성공").isEqualTo(capacity);
+        assertThat(failCount.get()).as("초과 요청은 모두 실패").isEqualTo(threadCount - capacity);
+
+        Schedule after = scheduleRepository.findById(scheduleIdx).orElseThrow();
+        assertThat(after.getRemaining()).as("재고가 정확히 0").isEqualTo(0);
+
+        assertThat(reservationRepository.count()).as("저장된 예약 수 = capacity").isEqualTo(capacity);
+        assertThat(reservationHistoryRepository.count()).as("히스토리도 capacity만큼").isEqualTo(capacity);
+    }
+
+    @Test
+    @DisplayName("동시 요청이 capacity와 같으면 - 전원 성공, 재고 0")
+    void create_concurrent_exact_capacity() throws InterruptedException {
+        int capacity = 5;
+        Long scheduleIdx = createSchedule(capacity, capacity, ScheduleStatus.OPEN);
+        List<Long> members = createMembers(capacity);
+
+        ExecutorService executor = Executors.newFixedThreadPool(capacity);
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch doneGate = new CountDownLatch(capacity);
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicReference<Throwable> unexpectedError = new AtomicReference<>();
+
+        for (int i = 0; i < capacity; i++) {
+            final Long memberIdx = members.get(i);
+            executor.submit(() -> {
+                try {
+                    startGate.await();
+                    reservationService.create(memberIdx, programIdx, scheduleIdx);
+                    successCount.incrementAndGet();
+                } catch (Throwable t) {
+                    unexpectedError.compareAndSet(null, t);
+                } finally {
+                    doneGate.countDown();
+                }
+            });
+        }
+
+        startGate.countDown();
+        doneGate.await(30, TimeUnit.SECONDS);
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
+
+        if (unexpectedError.get() != null) {
+            throw new AssertionError("의도치 않은 예외 발생", unexpectedError.get());
+        }
+        assertThat(successCount.get()).isEqualTo(capacity);
+        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining()).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("스케줄 CLOSED - 예약 불가")
+    void create_fail_closedSchedule() {
+        Long scheduleIdx = createSchedule(5, 5, ScheduleStatus.CLOSED);
+        Long memberIdx = createMembers(1).get(0);
+
+        assertThatThrownBy(() -> reservationService.create(memberIdx, programIdx, scheduleIdx))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("예약 가능한 스케줄이 아닙니다");
+
+        assertThat(reservationRepository.count()).isEqualTo(0);
+        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining()).isEqualTo(5);
+    }
+
+    @Test
+    @DisplayName("재고가 0이면 - 예약 불가")
+    void create_fail_noRemaining() {
+        Long scheduleIdx = createSchedule(5, 0, ScheduleStatus.OPEN);
+        Long memberIdx = createMembers(1).get(0);
+
+        assertThatThrownBy(() -> reservationService.create(memberIdx, programIdx, scheduleIdx))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("잔여석이 없습니다");
+
+        assertThat(reservationRepository.count()).isEqualTo(0);
+    }
+}

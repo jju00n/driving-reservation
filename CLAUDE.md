@@ -85,7 +85,7 @@ src/main/java/com/example/driving/
 | CONFIRMED | 예약 확정 | 결제 완료 시 |
 | PAYMENT_FAILED | 결제 실패 | 결제 실패 시 → 재고 복구 |
 | CANCELLED | 예약 취소 | 고객 취소 시 → 재고 복구 + 환불 |
-| EXPIRED | 예약 만료 | 1시간 초과 미결제 → 재고 복구 |
+| EXPIRED | 예약 만료 | 미결제 만료 → 재고 복구 (토스 만료 정책 연동, 아래 참고) |
 
 ### 결제 상태 (PaymentStatus)
 | 상태 | 설명 |
@@ -125,6 +125,27 @@ src/main/java/com/example/driving/
 [5] 백엔드 → amount 위변조 검증 → 토스 confirm API 호출
 [6] 성공: CONFIRMED, 실패: PAYMENT_FAILED + 재고 복구
 ```
+
+## 미결제 만료 정책 (EXPIRED)
+
+토스 결제 유효시간과 우리 예약 만료 정책을 **30분 기준으로 일치**시킨다.
+
+**토스 만료 메커니즘 (2단계 타이머):**
+- ① 결제창 인증: **30분** 안에 고객이 결제창에서 인증하지 않으면 `EXPIRED`
+- ② 승인 대기: 인증 후(IN_PROGRESS) **10분** 안에 상점이 confirm API를 호출하지 않으면 `EXPIRED`
+- 만료 시 토스가 `PAYMENT_STATUS_CHANGED` 웹훅 발송 (`data.status == EXPIRED`)
+
+**핵심:** 토스가 결제를 EXPIRED 처리해도 **우리 DB의 예약/재고는 자동으로 풀리지 않는다.** 우리 쪽 만료 처리가 반드시 필요.
+
+**처리 전략 (웹훅 1차 + 스케줄러 안전망):**
+| 경로 | 동작 |
+|------|------|
+| 1차: 토스 웹훅 | `PAYMENT_STATUS_CHANGED` 수신 → `data.status == EXPIRED` → `data.orderId`로 예약 조회 → `expire()` + 재고 복구 (실시간) |
+| 2차: 스케줄러 (안전망) | `reservedAt + 40분`(토스 30+10분보다 여유) 초과 PAYMENT_PENDING 건 청소. 웹훅 유실/서버 다운 중 미수신 대비 |
+
+**멱등성:** `webhook_events.order_id` 중복 체크 + `Reservation.expire()`의 상태 가드(`isPaymentPending()`)로 중복 재고 복구 방지.
+
+> 상세 흐름은 `docs/payment-sequence.md` 참고.
 
 ## 분산락 전략
 
@@ -192,130 +213,13 @@ ApiResponse.fail("에러 메시지")
 
 **총 25.5일 / 버퍼 4.5일**
 
-## 현재 진행 상황
+## ERD / 데이터 모델
 
-| 주차 | 항목 | 상태 |
-|------|------|------|
-| 1주차 | 프로젝트 초기 설정 | 완료 |
-| 1주차 | 회원가입 / 로그인 / 로그아웃 구현 + 테스트 | 완료 |
-| 1주차 | 프로그램 조회 (리스트/상세) + 테스트 | 완료 |
-| 1주차 | PR 제출 (feature/member) | 미완료 |
-| 2주차~ | 예약, 결제, 이후 기능 | 미착수 |
+상세 스키마(테이블별 컬럼 정의 + 인덱스 설계)는 @docs/erd.md 참고.
 
-**현재 브랜치:** `feature/member` (회원가입/로그인/로그아웃 + 프로그램 조회 커밋 완료, PR 미제출)
-
-## ERD 컬럼 정의
-
-### users
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| member_idx | BIGINT | PK, AUTO_INCREMENT |
-| email | VARCHAR(100) | 평문 (INDEX) |
-| password | VARCHAR(60) | BCrypt 단방향 |
-| name | VARCHAR(255) | 평문 저장 가능 (멘토 확인 — AES 암호화는 선택사항) |
-| phone | VARCHAR(255) | 평문 저장 가능 (멘토 확인 — AES 암호화는 선택사항) |
-| role | VARCHAR(20) | CUSTOMER / ADMIN |
-| created_at | DATETIME | |
-| updated_at | DATETIME | |
-| deleted_at | DATETIME | nullable |
-
-### vehicles
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| vehicle_idx | BIGINT | PK, AUTO_INCREMENT |
-| name | VARCHAR(100) | |
-| model | VARCHAR(100) | |
-| created_at | DATETIME | |
-| updated_at | DATETIME | |
-
-### programs
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| program_idx | BIGINT | PK, AUTO_INCREMENT |
-| vehicle_idx | BIGINT | FK → vehicles |
-| name | VARCHAR(100) | |
-| duration | INT | 진행시간(분) |
-| amount | BIGINT | 금액 |
-| status | VARCHAR(20) | ACTIVE / INACTIVE |
-| created_at | DATETIME | |
-| updated_at | DATETIME | |
-
-### schedules
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| schedule_idx | BIGINT | PK, AUTO_INCREMENT |
-| program_idx | BIGINT | FK → programs |
-| start_at | DATETIME | |
-| end_at | DATETIME | |
-| capacity | INT | 정원 |
-| remaining | INT | 잔여석 (분산락으로 차감) |
-| status | VARCHAR(20) | OPEN / CLOSED / CANCELLED |
-| created_at | DATETIME | |
-| updated_at | DATETIME | |
-
-### reservations
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| reservation_idx | BIGINT | PK, AUTO_INCREMENT |
-| member_idx | BIGINT | FK → users |
-| program_idx | BIGINT | FK → programs |
-| schedule_idx | BIGINT | FK → schedules |
-| order_id | VARCHAR(64) | UNIQUE (토스 orderId) |
-| amount | BIGINT | |
-| status | VARCHAR(20) | ReservationStatus |
-| reserved_at | DATETIME | NOT NULL |
-| created_at | DATETIME | |
-| updated_at | DATETIME | |
-
-### payments
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| payment_idx | BIGINT | PK, AUTO_INCREMENT |
-| reservation_idx | BIGINT | FK, UNIQUE → reservations |
-| payment_key | VARCHAR(200) | UNIQUE (토스 paymentKey) |
-| order_id | VARCHAR(64) | UNIQUE |
-| amount | BIGINT | |
-| status | VARCHAR(20) | PaymentStatus |
-| failure_code | VARCHAR(50) | nullable |
-| failure_message | VARCHAR(255) | nullable |
-| requested_at | DATETIME | nullable |
-| approved_at | DATETIME | nullable |
-| created_at | DATETIME | |
-| updated_at | DATETIME | |
-
-### reservation_histories / payment_histories
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| history_idx | BIGINT | PK, AUTO_INCREMENT |
-| reservation_idx / payment_idx | BIGINT | FK |
-| status | VARCHAR(20) | 상태 스냅샷 |
-| created_at | DATETIME | |
-
-### webhook_events
-| 컬럼 | 타입 | 비고 |
-|------|------|------|
-| webhook_event_idx | BIGINT | PK, AUTO_INCREMENT |
-| event_type | VARCHAR(50) | PAYMENT_STATUS_CHANGED / CANCEL_STATUS_CHANGED |
-| order_id | VARCHAR(64) | nullable, INDEX (payments/reservations 조회용) |
-| raw_payload | TEXT | 토스 웹훅 원문 JSON |
-| status | VARCHAR(20) | RECEIVED / PROCESSED / FAILED |
-| created_at | DATETIME | |
-
-> FK 없음 — 웹훅은 예외 상황 대비 안전망이므로 참조 무결성보다 유연성 우선. order_id로 payments/reservations 조회.
-
-## 인덱스 설계 (멘토 피드백 반영)
-
-| 테이블 | 인덱스 컬럼 | 용도 |
-|--------|------------|------|
-| users | `email` | 로그인 시 이메일 조회 |
-| schedules | `program_idx`, `start_at` | 프로그램별 일정 목록 조회 |
-| reservations | `member_idx` | 회원별 예약 목록 조회 |
-| reservations | `order_id` | 결제 연동 시 orderId 조회 |
-| payments | `order_id` | 결제 확인/웹훅 처리 |
-| payments | `payment_key` | 결제 취소 시 paymentKey 조회 |
-| webhook_events | `order_id` | 웹훅 이벤트 중복 처리 방지 |
+> 진행 상황은 이 문서에 두지 않음 — AI 메모리(`progress-next`)로 일원화하여 stale/중복 방지.
 
 ---
 
 **생성:** 멘토링 10회차 설계 기반 (2026-05-18)
-**최종 업데이트:** 2026-05-19 (멘토 피드백 반영: webhook_events 테이블 추가, 인덱스 설계 추가)
+**최종 업데이트:** 2026-05-29 (ERD를 docs/erd.md로 분리, 진행 상황 섹션 제거 — stale/중복 방지)

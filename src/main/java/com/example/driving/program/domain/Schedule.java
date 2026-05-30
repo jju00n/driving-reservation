@@ -1,5 +1,6 @@
 package com.example.driving.program.domain;
 
+import com.example.driving.common.exception.BusinessException;
 import com.example.driving.program.enums.ScheduleStatus;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
@@ -28,4 +29,24 @@ public class Schedule {
     private ScheduleStatus status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+
+    public boolean isOpen() {
+        return this.status == ScheduleStatus.OPEN;
+    }
+
+    public void decreaseRemaining() {
+        if (this.remaining <= 0) {
+            throw new BusinessException("잔여석이 없습니다.");
+        }
+        this.remaining -= 1;
+        this.updatedAt = LocalDateTime.now();
+    }
+
+    public void increaseRemaining() {
+        if (this.remaining >= this.capacity) {
+            throw new BusinessException("잔여석이 정원을 초과할 수 없습니다.");
+        }
+        this.remaining += 1;
+        this.updatedAt = LocalDateTime.now();
+    }
 }
