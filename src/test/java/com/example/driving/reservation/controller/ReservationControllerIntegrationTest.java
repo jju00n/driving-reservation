@@ -13,25 +13,31 @@ import com.example.driving.program.repository.ProgramRepository;
 import com.example.driving.program.repository.ScheduleRepository;
 import com.example.driving.program.repository.VehicleRepository;
 import com.example.driving.reservation.dto.CreateReservationRequest;
-import com.example.driving.reservation.repository.ReservationHistoryRepository;
 import com.example.driving.reservation.repository.ReservationRepository;
 import com.example.driving.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 컨테이너를 공유하므로 테스트 간 DB 데이터가 누적된다.
+ * 별도 cleanup 없이도 격리되도록, 각 테스트는 setUp 에서 고유한 회원/프로그램/스케줄을 새로 만들고
+ * 전역 카운트가 아니라 자신이 만든 scheduleIdx/orderId 단위로만 단언한다.
+ */
 @DisplayName("예약 신청 컨트롤러 통합 테스트")
 class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
 
@@ -41,8 +47,6 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
     private ObjectMapper objectMapper;
     @Autowired
     private JwtProvider jwtProvider;
-    @Autowired
-    private StringRedisTemplate stringRedisTemplate;
 
     @Autowired
     private MemberRepository memberRepository;
@@ -54,8 +58,6 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
     private ScheduleRepository scheduleRepository;
     @Autowired
     private ReservationRepository reservationRepository;
-    @Autowired
-    private ReservationHistoryRepository reservationHistoryRepository;
 
     private Long memberIdx;
     private String accessToken;
@@ -64,18 +66,10 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        reservationHistoryRepository.deleteAll();
-        reservationRepository.deleteAll();
-        scheduleRepository.deleteAll();
-        programRepository.deleteAll();
-        vehicleRepository.deleteAll();
-        memberRepository.deleteAll();
-        stringRedisTemplate.getConnectionFactory().getConnection().serverCommands().flushDb();
-
         LocalDateTime now = LocalDateTime.now();
 
         Member member = memberRepository.save(Member.builder()
-                .email("user@test.com").password("encoded")
+                .email("reservation-" + UUID.randomUUID() + "@test.com").password("encoded")
                 .name("user").phone("01000000000")
                 .role(Role.CUSTOMER)
                 .createdAt(now).updatedAt(now)
@@ -104,6 +98,10 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
         this.scheduleIdx = schedule.getScheduleIdx();
     }
 
+    private int remaining() {
+        return scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining();
+    }
+
     @Test
     @DisplayName("인증 없이 예약 시도 - 403 Forbidden (Spring Security 기본 동작)")
     void create_unauthorized() throws Exception {
@@ -114,7 +112,7 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isForbidden());
 
-        assertThat(reservationRepository.count()).isEqualTo(0);
+        assertThat(remaining()).isEqualTo(5); // 차감되지 않음
     }
 
     @Test
@@ -122,7 +120,7 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
     void create_success() throws Exception {
         CreateReservationRequest request = new CreateReservationRequest(programIdx, scheduleIdx);
 
-        mockMvc.perform(post("/reservations")
+        MvcResult result = mockMvc.perform(post("/reservations")
                         .header("Authorization", "Bearer " + accessToken)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
@@ -130,10 +128,13 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.success").value(true))
                 .andExpect(jsonPath("$.data.reservationIdx").isNumber())
                 .andExpect(jsonPath("$.data.orderId").isNotEmpty())
-                .andExpect(jsonPath("$.data.amount").value(150_000));
+                .andExpect(jsonPath("$.data.amount").value(150_000))
+                .andReturn();
 
-        assertThat(reservationRepository.count()).isEqualTo(1);
-        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining()).isEqualTo(4);
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        String orderId = body.get("data").get("orderId").asText();
+        assertThat(reservationRepository.findByOrderId(orderId)).isPresent();
+        assertThat(remaining()).isEqualTo(4);
     }
 
     @Test
@@ -148,7 +149,7 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.success").value(false));
 
-        assertThat(reservationRepository.count()).isEqualTo(0);
+        assertThat(remaining()).isEqualTo(5);
     }
 
     @Test
@@ -164,8 +165,7 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value("스케줄과 프로그램이 일치하지 않습니다."));
 
-        assertThat(reservationRepository.count()).isEqualTo(0);
-        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining()).isEqualTo(5);
+        assertThat(remaining()).isEqualTo(5);
     }
 
     @Test
@@ -179,5 +179,7 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.success").value(false));
+
+        assertThat(remaining()).isEqualTo(5); // 내 스케줄은 그대로
     }
 }

@@ -4,12 +4,9 @@ import com.example.driving.member.domain.Member;
 import com.example.driving.member.dto.LoginRequest;
 import com.example.driving.member.dto.SignupRequest;
 import com.example.driving.member.repository.MemberRepository;
-import com.example.driving.reservation.repository.ReservationHistoryRepository;
-import com.example.driving.reservation.repository.ReservationRepository;
 import com.example.driving.support.AbstractIntegrationTest;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +21,11 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 컨테이너를 공유하므로 테스트 간 DB 데이터가 누적된다.
+ * 별도 cleanup 없이도 격리되도록, 각 테스트는 고유한 이메일을 사용하고
+ * 자신이 생성/조회한 데이터(memberIdx 단위 Redis 키 등)만 단언한다.
+ */
 class AuthControllerIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
@@ -41,24 +43,10 @@ class AuthControllerIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
-    @Autowired
-    private ReservationHistoryRepository reservationHistoryRepository;
-
-    @Autowired
-    private ReservationRepository reservationRepository;
-
-    @BeforeEach
-    void cleanup() {
-        reservationHistoryRepository.deleteAll();
-        reservationRepository.deleteAll();
-        memberRepository.deleteAll();
-        stringRedisTemplate.getConnectionFactory().getConnection().serverCommands().flushDb();
-    }
-
     @Test
     @DisplayName("회원가입 성공 - 201 응답 및 DB 저장")
     void signup_success() throws Exception {
-        SignupRequest request = new SignupRequest("test@example.com", "password123", "홍길동", "01012345678");
+        SignupRequest request = new SignupRequest("signup-success@example.com", "password123", "홍길동", "01012345678");
 
         mockMvc.perform(post("/auth/signup")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -66,7 +54,7 @@ class AuthControllerIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.success").value(true));
 
-        assertThat(memberRepository.existsByEmail("test@example.com")).isTrue();
+        assertThat(memberRepository.existsByEmail("signup-success@example.com")).isTrue();
     }
 
     @Test
@@ -84,8 +72,8 @@ class AuthControllerIntegrationTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("회원가입 실패 - 중복 이메일")
     void signup_fail_duplicateEmail() throws Exception {
-        memberRepository.save(Member.create("dup@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
-        SignupRequest request = new SignupRequest("dup@example.com", "password123", "홍길동", "01012345678");
+        memberRepository.save(Member.create("signup-dup@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
+        SignupRequest request = new SignupRequest("signup-dup@example.com", "password123", "홍길동", "01012345678");
 
         mockMvc.perform(post("/auth/signup")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -98,8 +86,8 @@ class AuthControllerIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("로그인 성공 - access/refresh 토큰 발급 및 Redis에 refresh 저장")
     void login_success() throws Exception {
         Member member = memberRepository.save(Member.create(
-                "login@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
-        LoginRequest request = new LoginRequest("login@example.com", "password123");
+                "login-success@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
+        LoginRequest request = new LoginRequest("login-success@example.com", "password123");
 
         MvcResult result = mockMvc.perform(post("/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -119,8 +107,8 @@ class AuthControllerIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("로그인 실패 - 비밀번호 불일치는 401")
     void login_fail_wrongPassword() throws Exception {
         memberRepository.save(Member.create(
-                "login@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
-        LoginRequest request = new LoginRequest("login@example.com", "wrong-password");
+                "login-fail@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
+        LoginRequest request = new LoginRequest("login-fail@example.com", "wrong-password");
 
         mockMvc.perform(post("/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -133,9 +121,9 @@ class AuthControllerIntegrationTest extends AbstractIntegrationTest {
     @DisplayName("로그아웃 성공 - 블랙리스트 등록 및 refresh 삭제")
     void logout_success() throws Exception {
         Member member = memberRepository.save(Member.create(
-                "logout@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
+                "logout-success@example.com", passwordEncoder.encode("password123"), "이름", "01000000000"));
 
-        LoginRequest loginRequest = new LoginRequest("logout@example.com", "password123");
+        LoginRequest loginRequest = new LoginRequest("logout-success@example.com", "password123");
         MvcResult loginResult = mockMvc.perform(post("/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(loginRequest)))
