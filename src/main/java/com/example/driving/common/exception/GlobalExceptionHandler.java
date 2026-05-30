@@ -1,16 +1,19 @@
 package com.example.driving.common.exception;
 
 import com.example.driving.common.response.ApiResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.BindException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+@Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<ApiResponse<Void>> handleBusinessException(BusinessException e) {
+        log.warn("BusinessException: status={}, message={}", e.getStatus(), e.getMessage());
         return ResponseEntity.status(e.getStatus()).body(ApiResponse.fail(e.getMessage()));
     }
 
@@ -20,12 +23,13 @@ public class GlobalExceptionHandler {
                 .map(fe -> fe.getField() + ": " + fe.getDefaultMessage())
                 .findFirst()
                 .orElse("유효하지 않은 요청입니다.");
+        log.warn("BindException: {}", message);
         return ResponseEntity.badRequest().body(ApiResponse.fail(message));
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleException(Exception e) {
-        e.printStackTrace();
+        log.error("Unhandled exception", e);
         return ResponseEntity.internalServerError().body(ApiResponse.fail("서버 오류가 발생했습니다."));
     }
 }

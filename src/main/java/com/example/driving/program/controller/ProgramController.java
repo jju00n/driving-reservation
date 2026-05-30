@@ -1,6 +1,5 @@
 package com.example.driving.program.controller;
 
-import com.example.driving.common.response.ApiResponse;
 import com.example.driving.program.dto.ProgramDetailResponse;
 import com.example.driving.program.dto.ProgramSummaryResponse;
 import com.example.driving.program.service.ProgramService;
@@ -24,13 +23,13 @@ public class ProgramController {
 
     @Operation(summary = "프로그램 리스트")
     @GetMapping
-    public ApiResponse<List<ProgramSummaryResponse>> getPrograms() {
-        return ApiResponse.ok(programService.getPrograms());
+    public List<ProgramSummaryResponse> getPrograms() {
+        return programService.getPrograms();
     }
 
     @Operation(summary = "프로그램 상세")
     @GetMapping("/{programIdx}")
-    public ApiResponse<ProgramDetailResponse> getProgram(@PathVariable Long programIdx) {
-        return ApiResponse.ok(programService.getProgram(programIdx));
+    public ProgramDetailResponse getProgram(@PathVariable Long programIdx) {
+        return programService.getProgram(programIdx);
     }
 }
