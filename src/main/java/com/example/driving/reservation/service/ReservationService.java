@@ -8,6 +8,7 @@ import com.example.driving.program.repository.ScheduleRepository;
 import com.example.driving.reservation.domain.Reservation;
 import com.example.driving.reservation.domain.ReservationHistory;
 import com.example.driving.reservation.dto.CreateReservationResponse;
+import com.example.driving.reservation.enums.ReservationStatus;
 import com.example.driving.reservation.repository.ReservationHistoryRepository;
 import com.example.driving.reservation.repository.ReservationRepository;
 import lombok.RequiredArgsConstructor;
@@ -79,8 +80,16 @@ public class ReservationService {
             throw new BusinessException("종료된 프로그램입니다.");
         }
 
-        schedule.decreaseRemaining();
-        scheduleRepository.save(schedule);
+        if (reservationRepository.existsByMemberIdxAndScheduleIdxAndStatusIn(
+                memberIdx, scheduleIdx, ReservationStatus.activeStatuses())) {
+            throw new BusinessException("이미 해당 스케줄에 예약이 있습니다.");
+        }
+
+        // 재고 원자 차감 (remaining > 0 조건). Redis 락 장애 시에도 DB가 음수 방지.
+        int decreased = scheduleRepository.decreaseRemainingIfAvailable(scheduleIdx);
+        if (decreased == 0) {
+            throw new BusinessException("잔여석이 없습니다.");
+        }
 
         String orderId = UUID.randomUUID().toString();
         Reservation reservation = Reservation.create(

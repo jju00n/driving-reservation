@@ -248,4 +248,66 @@ class ReservationConcurrencyIntegrationTest extends AbstractIntegrationTest {
 
         assertThat(reservationRepository.count()).isEqualTo(0);
     }
+
+    @Test
+    @DisplayName("같은 회원이 같은 스케줄에 중복 예약 - 두 번째 실패, 재고 1만 차감")
+    void create_fail_duplicateReservation() {
+        Long scheduleIdx = createSchedule(2, 2, ScheduleStatus.OPEN);
+        Long memberIdx = createMembers(1).get(0);
+
+        reservationService.create(memberIdx, programIdx, scheduleIdx);
+
+        assertThatThrownBy(() -> reservationService.create(memberIdx, programIdx, scheduleIdx))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("이미 해당 스케줄에 예약이 있습니다");
+
+        assertThat(reservationRepository.count()).as("예약은 1건만").isEqualTo(1);
+        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
+                .as("재고는 1만 차감").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("동시에 같은 회원이 capacity=5 스케줄에 5번 예약 시도 - 1명만 성공")
+    void create_concurrent_sameMember_onlyOne() throws InterruptedException {
+        int threadCount = 5;
+        Long scheduleIdx = createSchedule(threadCount, threadCount, ScheduleStatus.OPEN);
+        Long memberIdx = createMembers(1).get(0);
+
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startGate = new CountDownLatch(1);
+        CountDownLatch doneGate = new CountDownLatch(threadCount);
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicInteger failCount = new AtomicInteger();
+        AtomicReference<Throwable> unexpectedError = new AtomicReference<>();
+
+        for (int i = 0; i < threadCount; i++) {
+            executor.submit(() -> {
+                try {
+                    startGate.await();
+                    reservationService.create(memberIdx, programIdx, scheduleIdx);
+                    successCount.incrementAndGet();
+                } catch (BusinessException e) {
+                    failCount.incrementAndGet();
+                } catch (Throwable t) {
+                    unexpectedError.compareAndSet(null, t);
+                } finally {
+                    doneGate.countDown();
+                }
+            });
+        }
+
+        startGate.countDown();
+        doneGate.await(30, TimeUnit.SECONDS);
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
+
+        if (unexpectedError.get() != null) {
+            throw new AssertionError("의도치 않은 예외 발생", unexpectedError.get());
+        }
+        assertThat(successCount.get()).as("한 회원은 1번만 성공").isEqualTo(1);
+        assertThat(failCount.get()).as("나머지는 중복으로 실패").isEqualTo(threadCount - 1);
+        assertThat(reservationRepository.count()).isEqualTo(1);
+        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
+                .as("재고는 1만 차감").isEqualTo(threadCount - 1);
+    }
 }
