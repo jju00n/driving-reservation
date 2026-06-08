@@ -26,3 +26,25 @@ springdoc:
 
 reservation:
   payment-pending-ttl-minutes: 60  # 결제 대기 만료 시간
+
+toss:
+  secret-key: ${TOSS_SECRET_KEY:test_sk_dummy}   # 운영은 환경변수 주입(테스트는 Mock이라 미사용)
+  base-url: ${TOSS_BASE_URL:https://api.tosspayments.com}
+  connect-timeout: 2s
+  read-timeout: 5s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      tossPayments:
+        register-health-indicator: true
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50          # 5xx/타임아웃 비율 50% 초과 시 오픈
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # 카드 거절 등 비즈니스 거절(4xx)은 서킷 집계에서 제외 — 게이트웨이 장애에만 반응
+        ignore-exceptions:
+          - com.example.driving.payment.exception.TossPaymentException
