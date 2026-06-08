@@ -25,7 +25,10 @@ springdoc:
     path: /api-docs
 
 reservation:
-  payment-pending-ttl-minutes: 60  # 결제 대기 만료 시간
+  payment-pending-ttl-minutes: 30  # 우리 미결제 만료 정책(토스 결제창 30분과 일치)
+  expiration:
+    scan-interval-ms: 60000   # 만료 스케줄러 주기(1분)
+    overdue-minutes: 40       # reservedAt + 40분 초과 PENDING 청소(토스 30+10분보다 여유)
 
 toss:
   secret-key: ${TOSS_SECRET_KEY:test_sk_dummy}   # 운영은 환경변수 주입(테스트는 Mock이라 미사용)

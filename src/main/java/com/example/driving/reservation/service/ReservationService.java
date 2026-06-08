@@ -102,4 +102,29 @@ public class ReservationService {
                 memberIdx, programIdx, scheduleIdx, orderId);
         return CreateReservationResponse.from(saved);
     }
+
+    /**
+     * 미결제 예약을 만료 처리하고 재고를 복구한다. 웹훅(1차)·만료 스케줄러(2차)가 공유한다.
+     *
+     * <p>멱등: {@code expireIfPending} 원자 UPDATE 가 PAYMENT_PENDING 인 경우에만 1을 반환하므로,
+     * 웹훅과 스케줄러가 같은 건을 동시에/중복으로 호출해도 재고 복구는 단 한 번만 일어난다.
+     * 재고 복구를 예약 상태전이(만료) 시점에 묶는 "재고 복구 단일 책임" 원칙은 confirm 실패 경로와 동일.
+     */
+    public void expireReservation(String orderId) {
+        transactionTemplate.executeWithoutResult(_ -> {
+            Reservation reservation = reservationRepository.findByOrderId(orderId).orElse(null);
+            if (reservation == null) {
+                log.warn("만료 대상 예약을 찾을 수 없음 - orderId={}", orderId);
+                return;
+            }
+            int expired = reservationRepository.expireIfPending(orderId);
+            if (expired == 0) {
+                return; // 이미 만료/확정 등으로 처리됨 — 중복 복구 방지(멱등)
+            }
+            scheduleRepository.increaseRemaining(reservation.getScheduleIdx());
+            reservationHistoryRepository.save(
+                    ReservationHistory.of(reservation.getReservationIdx(), ReservationStatus.EXPIRED));
+            log.info("예약 만료 + 재고 복구 - orderId={}, scheduleIdx={}", orderId, reservation.getScheduleIdx());
+        });
+    }
 }
