@@ -47,6 +47,8 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-mysql")
+    // Fixture Monkey - 랜덤 객체 생성으로 다양한 입력(이모지/다국어/경계값) 케이스 검증
+    testImplementation("com.navercorp.fixturemonkey:fixture-monkey-starter:1.1.18")
     testCompileOnly("org.projectlombok:lombok")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testAnnotationProcessor("org.projectlombok:lombok")
