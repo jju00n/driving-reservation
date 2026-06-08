@@ -82,7 +82,7 @@ public class ReservationService {
 
         if (reservationRepository.existsByMemberIdxAndScheduleIdxAndStatusIn(
                 memberIdx, scheduleIdx, ReservationStatus.activeStatuses())) {
-            throw new BusinessException("이미 해당 스케줄에 예약이 있습니다.");
+            throw new BusinessException("이미 해당 스케줄에 예약이 있습니다.", HttpStatus.CONFLICT);
         }
 
         // 재고 원자 차감 (remaining > 0 조건). Redis 락 장애 시에도 DB가 음수 방지.
