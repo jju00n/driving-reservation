@@ -9,6 +9,8 @@ import com.example.driving.program.domain.Schedule;
 import com.example.driving.program.domain.Vehicle;
 import com.example.driving.program.enums.ProgramStatus;
 import com.example.driving.program.enums.ScheduleStatus;
+import com.example.driving.payment.repository.PaymentHistoryRepository;
+import com.example.driving.payment.repository.PaymentRepository;
 import com.example.driving.program.repository.ProgramRepository;
 import com.example.driving.program.repository.ScheduleRepository;
 import com.example.driving.program.repository.VehicleRepository;
@@ -55,11 +57,18 @@ class ReservationConcurrencyIntegrationTest extends AbstractIntegrationTest {
     private ReservationRepository reservationRepository;
     @Autowired
     private ReservationHistoryRepository reservationHistoryRepository;
+    @Autowired
+    private PaymentRepository paymentRepository;
+    @Autowired
+    private PaymentHistoryRepository paymentHistoryRepository;
 
     private Long programIdx;
 
     @BeforeEach
     void cleanup() {
+        // 공유 컨테이너 — 다른 통합테스트(결제)가 남긴 payments 가 reservations 를 FK 참조하므로 먼저 삭제(자식→부모 순).
+        paymentHistoryRepository.deleteAll();
+        paymentRepository.deleteAll();
         reservationHistoryRepository.deleteAll();
         reservationRepository.deleteAll();
         scheduleRepository.deleteAll();
