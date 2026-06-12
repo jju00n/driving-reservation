@@ -39,15 +39,15 @@ toss:
 resilience4j:
   circuitbreaker:
     instances:
-      tossPayments:
-        register-health-indicator: true
-        sliding-window-type: COUNT_BASED
-        sliding-window-size: 10
-        minimum-number-of-calls: 5
-        failure-rate-threshold: 50          # 5xx/타임아웃 비율 50% 초과 시 오픈
-        wait-duration-in-open-state: 5s
-        permitted-number-of-calls-in-half-open-state: 3
-        automatic-transition-from-open-to-half-open-enabled: true
+      tossPayments:                              # @CircuitBreaker(name="tossPayments")와 매칭되는 인스턴스명
+        register-health-indicator: true          # /actuator/health 에 서킷 상태(OPEN/CLOSED) 노출
+        sliding-window-type: COUNT_BASED         # 최근 "호출 건수" 기준 집계 (시간 기준 TIME_BASED 아님)
+        sliding-window-size: 10                  # 집계 윈도우 크기 = 최근 10건
+        minimum-number-of-calls: 5               # 최소 5건 쌓이기 전엔 실패율 평가 안 함 (표본 부족 시 성급한 오픈 방지)
+        failure-rate-threshold: 50               # 실패율 50% 초과 시 OPEN (5xx/타임아웃만 실패로 집계)
+        wait-duration-in-open-state: 5s          # OPEN 유지 시간. 5초간 호출 차단 후 HALF_OPEN 으로 전환
+        permitted-number-of-calls-in-half-open-state: 3   # HALF_OPEN 에서 허용하는 시험 호출 수. 이 3건으로 복구 판정
+        automatic-transition-from-open-to-half-open-enabled: true   # 요청 없이도 5초 경과 시 타이머로 자동 HALF_OPEN 전환
         # 카드 거절 등 비즈니스 거절(4xx)은 서킷 집계에서 제외 — 게이트웨이 장애에만 반응
-        ignore-exceptions:
-          - com.example.driving.payment.exception.TossPaymentException
+        ignore-exceptions:                       # 여기 등록된 예외는 실패로 안 침 (정상 비즈니스 흐름이므로)
+          - com.example.driving.payment.exception.TossPaymentException   # 4xx 카드 거절
