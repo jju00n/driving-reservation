@@ -120,6 +120,7 @@ class ReservationServiceTest {
         stubTransactionTemplateExecutesCallback();
         given(scheduleRepository.findById(SCHEDULE_IDX)).willReturn(Optional.of(schedule));
         given(programRepository.findById(PROGRAM_IDX)).willReturn(Optional.of(program));
+        given(scheduleRepository.decreaseRemainingIfAvailable(SCHEDULE_IDX)).willReturn(1);
         given(reservationRepository.save(any(Reservation.class)))
                 .willAnswer(invocation -> {
                     Reservation r = invocation.getArgument(0);
@@ -142,8 +143,7 @@ class ReservationServiceTest {
         assertThat(response.reservationIdx()).isEqualTo(999L);
         assertThat(response.amount()).isEqualTo(AMOUNT);
         assertThat(response.orderId()).isNotBlank();
-        assertThat(schedule.getRemaining()).isEqualTo(4);
-        verify(scheduleRepository).save(schedule);
+        verify(scheduleRepository).decreaseRemainingIfAvailable(SCHEDULE_IDX);
         verify(reservationRepository).save(any(Reservation.class));
         verify(reservationHistoryRepository).save(any(ReservationHistory.class));
         verify(rLock).unlock();
@@ -206,7 +206,7 @@ class ReservationServiceTest {
     }
 
     @Test
-    @DisplayName("잔여석 0 - 도메인이 예외 (스케줄 OPEN이어도)")
+    @DisplayName("잔여석 0 - 원자 차감 UPDATE가 0행이면 예외 (스케줄 OPEN이어도)")
     void create_fail_noRemaining() throws InterruptedException {
         Schedule schedule = openSchedule(0);
         Program program = activeProgram();
@@ -216,12 +216,12 @@ class ReservationServiceTest {
         stubTransactionTemplateExecutesCallback();
         given(scheduleRepository.findById(SCHEDULE_IDX)).willReturn(Optional.of(schedule));
         given(programRepository.findById(PROGRAM_IDX)).willReturn(Optional.of(program));
+        given(scheduleRepository.decreaseRemainingIfAvailable(SCHEDULE_IDX)).willReturn(0);
 
         assertThatThrownBy(() -> reservationService.create(MEMBER_IDX, PROGRAM_IDX, SCHEDULE_IDX))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("잔여석이 없습니다");
 
-        verify(scheduleRepository, never()).save(any());
         verify(reservationRepository, never()).save(any());
         verify(rLock).unlock();
     }

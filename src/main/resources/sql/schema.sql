@@ -60,8 +60,15 @@ CREATE TABLE IF NOT EXISTS reservations (
     reserved_at     DATETIME     NOT NULL,
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    -- 같은 회원이 같은 스케줄에 활성(결제대기/예약확정) 예약을 2건 갖는 것을 막는 DB 최종 방어선.
+    -- MySQL은 부분 유니크 인덱스(UNIQUE ... WHERE)가 없어, "활성=키 / 비활성=NULL" 생성 컬럼에 유니크를 건다.
+    -- 비활성(실패/취소/만료)은 NULL → 유니크가 NULL 중복을 허용하므로 재예약 가능.
+    active_dup_key  VARCHAR(41)  AS (CASE WHEN status IN ('PAYMENT_PENDING', 'CONFIRMED')
+                                          THEN CONCAT(member_idx, '-', schedule_idx)
+                                          ELSE NULL END) VIRTUAL,
     PRIMARY KEY (reservation_idx),
     UNIQUE KEY uk_reservations_order_id (order_id),
+    UNIQUE KEY uk_reservations_active_member_schedule (active_dup_key),
     CONSTRAINT fk_reservations_member   FOREIGN KEY (member_idx)   REFERENCES users (member_idx),
     CONSTRAINT fk_reservations_schedule FOREIGN KEY (schedule_idx) REFERENCES schedules (schedule_idx),
     CONSTRAINT fk_reservations_program  FOREIGN KEY (program_idx)  REFERENCES programs (program_idx),

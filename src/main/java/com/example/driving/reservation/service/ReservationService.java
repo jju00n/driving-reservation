@@ -8,12 +8,14 @@ import com.example.driving.program.repository.ScheduleRepository;
 import com.example.driving.reservation.domain.Reservation;
 import com.example.driving.reservation.domain.ReservationHistory;
 import com.example.driving.reservation.dto.CreateReservationResponse;
+import com.example.driving.reservation.enums.ReservationStatus;
 import com.example.driving.reservation.repository.ReservationHistoryRepository;
 import com.example.driving.reservation.repository.ReservationRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -79,18 +81,68 @@ public class ReservationService {
             throw new BusinessException("종료된 프로그램입니다.");
         }
 
-        schedule.decreaseRemaining();
-        scheduleRepository.save(schedule);
+        if (reservationRepository.existsByMemberIdxAndScheduleIdxAndStatusIn(
+                memberIdx, scheduleIdx, ReservationStatus.activeStatuses())) {
+            throw new BusinessException("이미 해당 스케줄에 예약이 있습니다.", HttpStatus.CONFLICT);
+        }
+
+        // 재고 원자 차감 (remaining > 0 조건). Redis 락 장애 시에도 DB가 음수 방지.
+        int decreased = scheduleRepository.decreaseRemainingIfAvailable(scheduleIdx);
+        if (decreased == 0) {
+            throw new BusinessException("잔여석이 없습니다.");
+        }
 
         String orderId = UUID.randomUUID().toString();
         Reservation reservation = Reservation.create(
                 memberIdx, scheduleIdx, program.getProgramIdx(), program.getAmount(), orderId);
-        Reservation saved = reservationRepository.save(reservation);
+        Reservation saved = saveOrConflict(reservation);
 
         reservationHistoryRepository.save(ReservationHistory.of(saved.getReservationIdx(), saved.getStatus()));
 
         log.info("예약 신청 완료 - memberIdx={}, programIdx={}, scheduleIdx={}, orderId={}",
                 memberIdx, programIdx, scheduleIdx, orderId);
         return CreateReservationResponse.from(saved);
+    }
+
+    /**
+     * 예약을 저장하되, DB 유니크 제약(uk_reservations_active_member_schedule) 위반은 중복 예약 409 로 변환한다.
+     *
+     * <p>정상 흐름에서는 위쪽 {@code existsBy...} 사전 조회가 먼저 막아 여기 도달하지 않는다.
+     * 이 경로는 <b>분산락 리스(5초) 만료 등으로 두 트랜잭션이 사전 조회를 동시에 통과한 극단 경합</b>의
+     * 최종 방어선이다. Spring Data JDBC(JdbcTemplate 예외 번역)는 유니크 위반을
+     * {@link DuplicateKeyException} 으로 던지므로, 이를 잡아 사전 조회와 동일한 409 계약으로 맞춘다.
+     * (BusinessException 전파 → 트랜잭션 롤백 → 직전 재고 차감도 자동 복구)
+     */
+    private Reservation saveOrConflict(Reservation reservation) {
+        try {
+            return reservationRepository.save(reservation);
+        } catch (DuplicateKeyException e) {
+            throw new BusinessException("이미 해당 스케줄에 예약이 있습니다.", HttpStatus.CONFLICT);
+        }
+    }
+
+    /**
+     * 미결제 예약을 만료 처리하고 재고를 복구한다. 웹훅(1차)·만료 스케줄러(2차)가 공유한다.
+     *
+     * <p>멱등: {@code expireIfPending} 원자 UPDATE 가 PAYMENT_PENDING 인 경우에만 1을 반환하므로,
+     * 웹훅과 스케줄러가 같은 건을 동시에/중복으로 호출해도 재고 복구는 단 한 번만 일어난다.
+     * 재고 복구를 예약 상태전이(만료) 시점에 묶는 "재고 복구 단일 책임" 원칙은 confirm 실패 경로와 동일.
+     */
+    public void expireReservation(String orderId) {
+        transactionTemplate.executeWithoutResult(_ -> {
+            Reservation reservation = reservationRepository.findByOrderId(orderId).orElse(null);
+            if (reservation == null) {
+                log.warn("만료 대상 예약을 찾을 수 없음 - orderId={}", orderId);
+                return;
+            }
+            int expired = reservationRepository.expireIfPending(orderId);
+            if (expired == 0) {
+                return; // 이미 만료/확정 등으로 처리됨 — 중복 복구 방지(멱등)
+            }
+            scheduleRepository.increaseRemaining(reservation.getScheduleIdx());
+            reservationHistoryRepository.save(
+                    ReservationHistory.of(reservation.getReservationIdx(), ReservationStatus.EXPIRED));
+            log.info("예약 만료 + 재고 복구 - orderId={}, scheduleIdx={}", orderId, reservation.getScheduleIdx());
+        });
     }
 }

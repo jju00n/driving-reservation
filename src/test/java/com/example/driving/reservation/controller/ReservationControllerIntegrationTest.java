@@ -13,25 +13,31 @@ import com.example.driving.program.repository.ProgramRepository;
 import com.example.driving.program.repository.ScheduleRepository;
 import com.example.driving.program.repository.VehicleRepository;
 import com.example.driving.reservation.dto.CreateReservationRequest;
-import com.example.driving.reservation.repository.ReservationHistoryRepository;
-import com.example.driving.reservation.repository.ReservationRepository;
 import com.example.driving.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 컨트롤러 통합 테스트 — endpoint 자체의 책임만 검증한다.
+ * (요청 바인딩 / Validation / 인증 / 예외→상태코드 변환(Advice) / 응답 봉투 포맷)
+ *
+ * 재고 차감·중복예약 멱등성 등 비즈니스 로직/DB 부작용은 서비스 계층 테스트의 책임이다
+ * (ReservationServiceTest, ReservationConcurrencyIntegrationTest). 여기서 중복 검증하지 않는다.
+ *
+ * 컨테이너를 공유하므로 각 테스트는 setUp 에서 고유한 회원/프로그램/스케줄을 새로 만든다(UUID 이메일).
+ */
 @DisplayName("예약 신청 컨트롤러 통합 테스트")
 class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
 
@@ -41,8 +47,6 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
     private ObjectMapper objectMapper;
     @Autowired
     private JwtProvider jwtProvider;
-    @Autowired
-    private StringRedisTemplate stringRedisTemplate;
 
     @Autowired
     private MemberRepository memberRepository;
@@ -52,36 +56,22 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
     private ProgramRepository programRepository;
     @Autowired
     private ScheduleRepository scheduleRepository;
-    @Autowired
-    private ReservationRepository reservationRepository;
-    @Autowired
-    private ReservationHistoryRepository reservationHistoryRepository;
 
-    private Long memberIdx;
     private String accessToken;
     private Long programIdx;
     private Long scheduleIdx;
 
     @BeforeEach
     void setUp() {
-        reservationHistoryRepository.deleteAll();
-        reservationRepository.deleteAll();
-        scheduleRepository.deleteAll();
-        programRepository.deleteAll();
-        vehicleRepository.deleteAll();
-        memberRepository.deleteAll();
-        stringRedisTemplate.getConnectionFactory().getConnection().serverCommands().flushDb();
-
         LocalDateTime now = LocalDateTime.now();
 
         Member member = memberRepository.save(Member.builder()
-                .email("user@test.com").password("encoded")
+                .email("reservation-" + UUID.randomUUID() + "@test.com").password("encoded")
                 .name("user").phone("01000000000")
                 .role(Role.CUSTOMER)
                 .createdAt(now).updatedAt(now)
                 .build());
-        this.memberIdx = member.getMemberIdx();
-        this.accessToken = jwtProvider.createAccessToken(memberIdx, Role.CUSTOMER.name());
+        this.accessToken = jwtProvider.createAccessToken(member.getMemberIdx(), Role.CUSTOMER.name());
 
         Vehicle vehicle = vehicleRepository.save(Vehicle.builder()
                 .name("BMW").model("M3").createdAt(now).updatedAt(now).build());
@@ -113,12 +103,10 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isForbidden());
-
-        assertThat(reservationRepository.count()).isEqualTo(0);
     }
 
     @Test
-    @DisplayName("정상 예약 - 201 Created + orderId/amount/reservationIdx 반환")
+    @DisplayName("정상 예약 - 201 Created + 응답 봉투(success/data) 포맷")
     void create_success() throws Exception {
         CreateReservationRequest request = new CreateReservationRequest(programIdx, scheduleIdx);
 
@@ -131,9 +119,6 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.data.reservationIdx").isNumber())
                 .andExpect(jsonPath("$.data.orderId").isNotEmpty())
                 .andExpect(jsonPath("$.data.amount").value(150_000));
-
-        assertThat(reservationRepository.count()).isEqualTo(1);
-        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining()).isEqualTo(4);
     }
 
     @Test
@@ -147,12 +132,10 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                         .content(body))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.success").value(false));
-
-        assertThat(reservationRepository.count()).isEqualTo(0);
     }
 
     @Test
-    @DisplayName("programIdx 불일치 - 400 Bad Request")
+    @DisplayName("programIdx 불일치 - 400 Bad Request + 메시지")
     void create_fail_programMismatch() throws Exception {
         Long wrongProgramIdx = programIdx + 999L;
         CreateReservationRequest request = new CreateReservationRequest(wrongProgramIdx, scheduleIdx);
@@ -162,10 +145,30 @@ class ReservationControllerIntegrationTest extends AbstractIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.success").value(false))
                 .andExpect(jsonPath("$.message").value("스케줄과 프로그램이 일치하지 않습니다."));
+    }
 
-        assertThat(reservationRepository.count()).isEqualTo(0);
-        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining()).isEqualTo(5);
+    @Test
+    @DisplayName("같은 회원·같은 스케줄 중복 예약 - 409 Conflict + 메시지")
+    void create_fail_duplicateReservation() throws Exception {
+        CreateReservationRequest request = new CreateReservationRequest(programIdx, scheduleIdx);
+
+        // 1차 예약 성공
+        mockMvc.perform(post("/reservations")
+                        .header("Authorization", "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isCreated());
+
+        // 2차 예약 - 같은 회원·같은 스케줄 → 409 Conflict 로 변환되는지(Advice)
+        mockMvc.perform(post("/reservations")
+                        .header("Authorization", "Bearer " + accessToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.message").value("이미 해당 스케줄에 예약이 있습니다."));
     }
 
     @Test
