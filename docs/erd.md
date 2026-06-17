@@ -3,6 +3,77 @@
 > 드라이빙 프로그램 예약 시스템 데이터 모델. CLAUDE.md에서 분리(2026-05-29).
 > 실제 스키마는 도메인 엔티티(`@Table`)와 마이그레이션 기준.
 
+## 관계도
+
+```mermaid
+erDiagram
+    vehicles ||--o{ programs : "보유"
+    programs ||--o{ schedules : "일정"
+    programs ||--o{ reservations : "프로그램"
+    schedules ||--o{ reservations : "좌석(재고)"
+    users ||--o{ reservations : "예약"
+    reservations ||--|| payments : "1:1 결제"
+    reservations ||--o{ reservation_histories : "상태 이력"
+    payments ||--o{ payment_histories : "상태 이력"
+
+    users {
+        bigint member_idx PK
+        varchar email UK
+        varchar password "BCrypt"
+        varchar role "CUSTOMER / ADMIN"
+    }
+    vehicles {
+        bigint vehicle_idx PK
+        varchar name
+        varchar model
+    }
+    programs {
+        bigint program_idx PK
+        bigint vehicle_idx FK
+        bigint amount "금액"
+        varchar status "ACTIVE / INACTIVE"
+    }
+    schedules {
+        bigint schedule_idx PK
+        bigint program_idx FK
+        int capacity "정원"
+        int remaining "잔여석 (분산락 차감)"
+        varchar status "OPEN / CLOSED / CANCELLED"
+    }
+    reservations {
+        bigint reservation_idx PK
+        bigint member_idx FK
+        bigint schedule_idx FK
+        bigint program_idx FK
+        varchar order_id UK "토스 orderId"
+        varchar status "PAYMENT_PENDING / CONFIRMED / ..."
+        varchar active_dup_key UK "중복예약 방지 가상컬럼"
+    }
+    payments {
+        bigint payment_idx PK
+        bigint reservation_idx FK "UNIQUE (1:1)"
+        varchar payment_key UK "토스 paymentKey"
+        varchar order_id UK
+        varchar status "PENDING / COMPLETED / ..."
+    }
+    reservation_histories {
+        bigint history_idx PK
+        bigint reservation_idx FK
+        varchar status "상태 스냅샷"
+    }
+    payment_histories {
+        bigint history_idx PK
+        bigint payment_idx FK
+        varchar status "상태 스냅샷"
+    }
+    webhook_events {
+        bigint webhook_event_idx PK
+        varchar order_id "INDEX · 논리적 연결 (FK 없음)"
+        varchar event_type
+        varchar status "RECEIVED / PROCESSED / FAILED"
+    }
+```
+
 ## users
 | 컬럼 | 타입 | 비고 |
 |------|------|------|
