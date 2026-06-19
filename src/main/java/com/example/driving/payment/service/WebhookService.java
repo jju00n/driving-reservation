@@ -3,7 +3,7 @@ package com.example.driving.payment.service;
 import com.example.driving.payment.domain.WebhookEvent;
 import com.example.driving.payment.enums.WebhookEventStatus;
 import com.example.driving.payment.repository.WebhookEventRepository;
-import com.example.driving.reservation.service.ReservationService;
+import com.example.driving.reservation.service.ReservationTxService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -17,7 +17,7 @@ import tools.jackson.databind.ObjectMapper;
  * (미결제 만료 → 예약 만료 + 재고 복구). 그 외 이벤트는 원문만 보관한다.
  *
  * <p>멱등 2중: ① 같은 orderId 가 이미 PROCESSED 면 재처리 스킵, ② 실제 만료는
- * {@link ReservationService#expireReservation} 의 원자 UPDATE 가 한 번만 복구하도록 보장.
+ * {@link ReservationTxService#expireReservation} 의 원자 UPDATE 가 한 번만 복구하도록 보장.
  */
 @Slf4j
 @Service
@@ -29,7 +29,7 @@ public class WebhookService {
 
     private final ObjectMapper objectMapper;
     private final WebhookEventRepository webhookEventRepository;
-    private final ReservationService reservationService;
+    private final ReservationTxService reservationTxService;
 
     public void handle(String rawPayload) {
         JsonNode root = objectMapper.readTree(rawPayload);
@@ -50,7 +50,7 @@ public class WebhookService {
                     && EVENT_PAYMENT_STATUS_CHANGED.equals(eventType)
                     && STATUS_EXPIRED.equals(dataStatus)
                     && orderId != null) {
-                reservationService.expireReservation(orderId); // ② 내부에서 원자 UPDATE 로 멱등 보장
+                reservationTxService.expireReservation(orderId); // ② 내부에서 원자 UPDATE 로 멱등 보장
             }
 
             event.markProcessed();
