@@ -1,0 +1,60 @@
+name: PR Test
+
+# PR이 올라오거나(커밋이 추가 푸시되면) develop / main 대상으로 전체 테스트를 자동 실행한다.
+# 목적: 리뷰/머지 전에 테스트 실패를 사전에 잡아 깨진 코드가 머지되는 것을 방지.
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+
+# publish-unit-test-result-action 이 PR에 체크/코멘트를 남기기 위해 필요한 권한.
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest  # Docker 데몬 내장 → Testcontainers(MySQL/Redis)가 동작
+    steps:
+      # ① 소스 체크아웃
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ② JDK 25 셋업 (build.gradle.kts toolchain = Java 25)
+      #    cache: gradle 옵션이 actions/cache 를 내장해 Gradle 의존성/래퍼 캐시를 재활용
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      # ③ gradlew 실행 권한 보장
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      # ④ 테스트 실행 (@ActiveProfiles("test") 라 test 프로파일 자동 적용)
+      #    실패해도 다음 스텝(결과 publish/Slack)이 돌도록 id 를 부여해 outcome 으로 분기한다.
+      - name: Run tests
+        id: test
+        run: ./gradlew test
+
+      # ⑤ 테스트 결과를 PR에 요약/체크로 표시 (테스트 실패 시에도 실행)
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: build/test-results/**/*.xml
+
+      # ⑥ Slack 알림 발송 — 성공/실패 무관하게 모든 PR 결과를 채널로 통지
+      #    SLACK_WEBHOOK_URL 은 repo Settings > Secrets and variables > Actions 에 등록 필요
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "${{ steps.test.outcome == 'success' && '✅ PR 테스트 통과' || '❌ PR 테스트 실패' }}: ${{ github.event.pull_request.title }}\n작성자: ${{ github.actor }} | 브랜치: ${{ github.head_ref }} → ${{ github.base_ref }}\n${{ github.event.pull_request.html_url }}"
