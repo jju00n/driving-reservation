@@ -358,7 +358,7 @@ class ReservationConcurrencyIntegrationTest extends AbstractIntegrationTest {
         Long memberIdx = createMembers(1).get(0);
 
         Reservation first = reservationRepository.save(activeReservation(memberIdx, scheduleIdx, "order-1"));
-        first.cancel(); // PAYMENT_PENDING → CANCELLED, active_dup_key 가 NULL 로 바뀜
+        first.cancel(LocalDateTime.now()); // PAYMENT_PENDING → CANCELLED, active_dup_key 가 NULL 로 바뀜
         reservationRepository.save(first);
 
         Reservation second = reservationRepository.save(activeReservation(memberIdx, scheduleIdx, "order-2"));
