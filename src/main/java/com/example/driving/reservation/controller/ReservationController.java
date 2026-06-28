@@ -3,13 +3,16 @@ package com.example.driving.reservation.controller;
 import com.example.driving.reservation.dto.CancelReservationResponse;
 import com.example.driving.reservation.dto.CreateReservationRequest;
 import com.example.driving.reservation.dto.CreateReservationResponse;
+import com.example.driving.reservation.dto.ReservationDetailResponse;
 import com.example.driving.reservation.service.ReservationCancelService;
+import com.example.driving.reservation.service.ReservationQueryService;
 import com.example.driving.reservation.service.ReservationService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -24,6 +27,7 @@ public class ReservationController {
 
     private final ReservationService reservationService;
     private final ReservationCancelService reservationCancelService;
+    private final ReservationQueryService reservationQueryService;
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
@@ -32,6 +36,14 @@ public class ReservationController {
             @Valid @RequestBody CreateReservationRequest request
     ) {
         return reservationService.create(memberIdx, request.programIdx(), request.scheduleIdx());
+    }
+
+    @GetMapping("/{reservationId}")
+    public ReservationDetailResponse get(
+            @AuthenticationPrincipal Long memberIdx,
+            @PathVariable Long reservationId
+    ) {
+        return reservationQueryService.getReservation(memberIdx, reservationId);
     }
 
     @DeleteMapping("/{reservationId}")
