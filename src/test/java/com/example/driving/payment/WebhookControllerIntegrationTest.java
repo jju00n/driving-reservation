@@ -3,7 +3,10 @@ package com.example.driving.payment;
 import com.example.driving.member.domain.Member;
 import com.example.driving.member.enums.Role;
 import com.example.driving.member.repository.MemberRepository;
+import com.example.driving.payment.domain.Payment;
+import com.example.driving.payment.enums.PaymentStatus;
 import com.example.driving.payment.enums.WebhookEventStatus;
+import com.example.driving.payment.repository.PaymentRepository;
 import com.example.driving.payment.repository.WebhookEventRepository;
 import com.example.driving.program.domain.Program;
 import com.example.driving.program.domain.Schedule;
@@ -55,6 +58,8 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private ReservationRepository reservationRepository;
     @Autowired
+    private PaymentRepository paymentRepository;
+    @Autowired
     private WebhookEventRepository webhookEventRepository;
 
     private String orderId;
@@ -88,6 +93,35 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
         return """
                 {"eventType":"PAYMENT_STATUS_CHANGED","data":{"orderId":"%s","status":"EXPIRED"}}
                 """.formatted(orderId);
+    }
+
+    private String canceledPayload(String orderId) {
+        return """
+                {"eventType":"PAYMENT_STATUS_CHANGED","data":{"orderId":"%s","status":"CANCELED"}}
+                """.formatted(orderId);
+    }
+
+    /** setUp 의 PENDING 예약을 "환불 미확정(5xx) 잔류" 상태(CONFIRMED + 결제 REFUND_REQUESTED)로 만든다. */
+    private void makeRefundRequested() {
+        Reservation reservation = reservationRepository.findByOrderId(orderId).orElseThrow();
+        reservation.confirm();
+        reservationRepository.save(reservation);
+
+        Payment payment = Payment.request(reservation.getReservationIdx(), orderId, AMOUNT, "pk_" + orderId);
+        payment.complete(LocalDateTime.now());
+        payment.refundRequest(); // COMPLETED → REFUND_REQUESTED (cancel 호출 직전 상태)
+        paymentRepository.save(payment);
+    }
+
+    /** 정상 결제 완료(CONFIRMED + 결제 COMPLETED) — 환불 요청한 적 없는 비대상 상태. */
+    private void makeConfirmedCompleted() {
+        Reservation reservation = reservationRepository.findByOrderId(orderId).orElseThrow();
+        reservation.confirm();
+        reservationRepository.save(reservation);
+
+        Payment payment = Payment.request(reservation.getReservationIdx(), orderId, AMOUNT, "pk_" + orderId);
+        payment.complete(LocalDateTime.now());
+        paymentRepository.save(payment);
     }
 
     @Test
@@ -136,6 +170,63 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
 
         assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.PAYMENT_PENDING);
+        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
+                .isEqualTo(REMAINING_AFTER_RESERVE);
+    }
+
+    @Test
+    @DisplayName("CANCELED 웹훅 - REFUND_REQUESTED 잔류 건 → 예약 CANCELLED + 결제 REFUNDED + 재고 복구")
+    void webhook_canceled_finalizesPendingRefund() throws Exception {
+        makeRefundRequested();
+
+        mockMvc.perform(post("/payments/webhook")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(canceledPayload(orderId)))
+                .andExpect(status().isOk());
+
+        assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.CANCELLED);
+        assertThat(paymentRepository.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(PaymentStatus.REFUNDED);
+        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
+                .isEqualTo(CAPACITY); // 4 → 5
+    }
+
+    @Test
+    @DisplayName("CANCELED 중복 수신 - 재고는 한 번만 복구(멱등)")
+    void webhook_canceled_duplicate_restoresStockOnce() throws Exception {
+        makeRefundRequested();
+
+        for (int i = 0; i < 3; i++) {
+            mockMvc.perform(post("/payments/webhook")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(canceledPayload(orderId)))
+                    .andExpect(status().isOk());
+        }
+
+        assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.CANCELLED);
+        assertThat(paymentRepository.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(PaymentStatus.REFUNDED);
+        assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
+                .isEqualTo(CAPACITY); // 중복 복구 없음
+    }
+
+    @Test
+    @DisplayName("CANCELED 웹훅 - 비대상(REFUND_REQUESTED 아님, 정상 CONFIRMED) → 변화 없음")
+    void webhook_canceled_nonTarget_noChange() throws Exception {
+        makeConfirmedCompleted();
+
+        mockMvc.perform(post("/payments/webhook")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(canceledPayload(orderId)))
+                .andExpect(status().isOk());
+
+        // 우리가 환불 요청한 적 없는 건은 보정 대상 아님 — 상태/재고 불변
+        assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(ReservationStatus.CONFIRMED);
+        assertThat(paymentRepository.findByOrderId(orderId).orElseThrow().getStatus())
+                .isEqualTo(PaymentStatus.COMPLETED);
         assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
                 .isEqualTo(REMAINING_AFTER_RESERVE);
     }
