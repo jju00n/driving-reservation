@@ -19,6 +19,35 @@ services:
     volumes:
       - redis-data:/data
 
+  # 메트릭 수집: 앱의 /actuator/prometheus 를 주기적으로 스크래핑
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: driving-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  # 시각화: Prometheus 를 데이터소스로 대시보드 렌더링
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: driving-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin      # 학습용. 접속 후 변경 프롬프트 뜸
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
 volumes:
   mysql-data:
   redis-data:
+  prometheus-data:
+  grafana-data:
