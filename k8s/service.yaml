@@ -1,0 +1,13 @@
+# Service: 여러 파드 앞단의 "고정 진입점"
+# 파드는 죽고 살면서 IP가 계속 바뀌지만, Service의 주소는 고정 → 로드밸런싱까지 담당
+apiVersion: v1
+kind: Service
+metadata:
+  name: driving-reservation
+spec:
+  type: ClusterIP            # 클러스터 내부용 (외부 노출은 Ingress가 담당)
+  selector:
+    app: driving-reservation # 이 라벨을 가진 파드들로 트래픽 분배
+  ports:
+    - port: 80               # Service가 받는 포트
+      targetPort: 8080       # 파드(컨테이너)로 전달할 포트

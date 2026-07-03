@@ -1,0 +1,47 @@
+# Deployment: "이 앱을 파드 N개로 항상 유지해라"를 선언
+# → 파드가 죽으면 자동 재시작(self-healing), 배포 시 무중단 롤링 업데이트
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: driving-reservation
+  labels:
+    app: driving-reservation
+spec:
+  replicas: 2                      # 파드 2개 유지 (하나 죽어도 서비스 지속)
+  selector:
+    matchLabels:
+      app: driving-reservation     # 아래 template 라벨과 매칭돼 이 파드들을 관리
+  template:
+    metadata:
+      labels:
+        app: driving-reservation   # Service가 이 라벨로 파드를 찾음
+    spec:
+      containers:
+        - name: app
+          image: driving-reservation:latest   # Dockerfile로 빌드한 그 이미지
+          ports:
+            - containerPort: 8080
+          # 설정/민감정보는 이미지 밖에서 주입 (ConfigMap/Secret)
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "prod"
+          # 리소스 요청/제한 → 스케줄링·과점유 방지
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          # 살아있나? 죽었으면 재시작 (self-healing)
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+          # 트래픽 받을 준비됐나? 안 됐으면 라우팅 제외
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 20
