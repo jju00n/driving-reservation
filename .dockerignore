@@ -1,7 +1,10 @@
 # 빌드 컨텍스트에서 제외 → 이미지 빌드 속도/캐시 향상, 불필요/민감 파일 유입 방지
 .git
 .gradle
-build
+# build 산출물은 통째로 제외하되, CI/gradle 이 만든 실행 jar(build/libs)만 예외로 통과시킨다.
+# (Dockerfile 이 재컴파일하지 않고 이 jar 를 받아 레이어 추출만 하기 때문)
+build/*
+!build/libs
 *.md
 docs
 .idea

@@ -64,3 +64,10 @@ tasks.withType<Test> {
         environment("DOCKER_HOST", "unix://${dockerSocket.absolutePath}")
     }
 }
+
+// plain jar(-plain.jar) 비활성화 — 실행 이미지엔 bootJar 만 필요하다.
+// build/libs 에 실행 가능한 layered jar 하나만 남겨 Dockerfile 의 COPY build/libs/*.jar 가
+// 정확히 그 jar 만 집도록 한다(plain jar 는 라이브러리 배포용이라 이 프로젝트엔 불필요).
+tasks.named<Jar>("jar") {
+    enabled = false
+}
