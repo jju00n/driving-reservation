@@ -3,6 +3,8 @@ spring:
     name: driving-reservation
   profiles:
     active: local
+  lifecycle:
+    timeout-per-shutdown-phase: 20s   # graceful 종료 시 처리중 요청 최대 20초 대기(결제/예약 트랜잭션 중 파드 강제종료 방지)
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
   data:
@@ -12,6 +14,31 @@ spring:
   security:
     user:
       name: admin
+
+server:
+  shutdown: graceful                  # SIGTERM 수신 시 새 요청 차단 + 처리중 요청 마무리
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus   # health·info·prometheus만 공개(env/beans/heapdump 등 민감 엔드포인트 비공개)
+  endpoint:
+    health:
+      probes:
+        enabled: true                 # /actuator/health/liveness, /readiness 활성화(k8s probe용)
+      show-details: never             # 내부 컴포넌트 상세는 외부 비노출(보안)
+      group:
+        readiness:
+          include: readinessState, redis, db   # Redis·DB 연결까지 준비 판정에 포함 → 끊기면 트래픽 라우팅 제외
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true    # HTTP 지연 히스토그램 버킷 생성 → Grafana에서 p95/p99 계산 가능
+  prometheus:
+    metrics:
+      export:
+        enabled: true
 
 jwt:
   secret: ${JWT_SECRET:local-dev-secret-key-must-be-at-least-256-bits-long}
