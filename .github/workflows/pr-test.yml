@@ -35,20 +35,32 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x ./gradlew
 
-      # ④ 테스트 실행 (@ActiveProfiles("test") 라 test 프로파일 자동 적용)
+      # ④ 빌드 실행 = 테스트 + bootJar 를 한 번에 (@ActiveProfiles("test") 라 test 프로파일 자동 적용)
+      #    build 태스크가 test 를 포함하므로 컴파일은 여기서 1회만.
+      #    이 산출물(jar)을 아티팩트로 올려 이미지 빌드가 재컴파일 없이 재사용한다.
       #    실패해도 다음 스텝(결과 publish/Slack)이 돌도록 id 를 부여해 outcome 으로 분기한다.
-      - name: Run tests
-        id: test
-        run: ./gradlew test
+      - name: Build (test + jar)
+        id: build
+        run: ./gradlew build
 
-      # ⑤ 테스트 결과를 PR에 요약/체크로 표시 (테스트 실패 시에도 실행)
+      # ⑤ 테스트 결과를 PR에 요약/체크로 표시 (빌드/테스트 실패 시에도 실행)
       - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2
         if: always()
         with:
           files: build/test-results/**/*.xml
 
-      # ⑥ Slack 알림 발송 — 성공/실패 무관하게 모든 PR 결과를 채널로 통지
+      # ⑥ 빌드된 실행 jar 를 아티팩트로 업로드 (성공 시에만)
+      #    Dockerfile 이 build/libs/*.jar 를 받아 레이어 추출만 하므로, 후속 이미지 빌드가 이 산출물을 재사용.
+      - name: Upload jar artifact
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: build/libs/*.jar
+          retention-days: 7
+
+      # ⑦ Slack 알림 발송 — 성공/실패 무관하게 모든 PR 결과를 채널로 통지
       #    SLACK_WEBHOOK_URL 은 repo Settings > Secrets and variables > Actions 에 등록 필요
       - name: Notify Slack
         if: always()
@@ -57,4 +69,4 @@ jobs:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
           payload: |
-            text: "${{ steps.test.outcome == 'success' && '✅ PR 테스트 통과' || '❌ PR 테스트 실패' }}: ${{ github.event.pull_request.title }}\n작성자: ${{ github.actor }} | 브랜치: ${{ github.head_ref }} → ${{ github.base_ref }}\n${{ github.event.pull_request.html_url }}"
+            text: "${{ steps.build.outcome == 'success' && '✅ PR 빌드/테스트 통과' || '❌ PR 빌드/테스트 실패' }}: ${{ github.event.pull_request.title }}\n작성자: ${{ github.actor }} | 브랜치: ${{ github.head_ref }} → ${{ github.base_ref }}\n${{ github.event.pull_request.html_url }}"
