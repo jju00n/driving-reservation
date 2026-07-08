@@ -21,7 +21,15 @@ spec:
           image: driving-reservation:latest   # Dockerfile로 빌드한 그 이미지
           ports:
             - containerPort: 8080
-          # 설정/민감정보는 이미지 밖에서 주입 (ConfigMap/Secret)
+          # 설정/민감정보는 이미지 밖에서 주입
+          #   - ConfigMap: 비민감 접속정보(DB_URL/USERNAME, REDIS_HOST/PORT, TOSS_BASE_URL)
+          #   - Secret: 민감정보(DB_PASSWORD, JWT_SECRET, TOSS_SECRET_KEY)
+          # 두 리소스의 key가 그대로 컨테이너 환경변수가 되어 application-prod.yml의 ${...}로 주입됨
+          envFrom:
+            - configMapRef:
+                name: driving-reservation-config
+            - secretRef:
+                name: driving-reservation-secret
           env:
             - name: SPRING_PROFILES_ACTIVE
               value: "prod"
