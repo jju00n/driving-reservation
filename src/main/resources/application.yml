@@ -32,6 +32,11 @@ management:
         readiness:
           include: readinessState, redis, db   # Redis·DB 연결까지 준비 판정에 포함 → 끊기면 트래픽 라우팅 제외
   metrics:
+    tags:
+      application: ${spring.application.name}   # 모든 메트릭에 application 라벨 부착 → Grafana "Unknown" 해결·다중 앱 구분
+    web:
+      server:
+        max-uri-tags: 50            # URI 태그 카디널리티 상한. 초과분은 하나로 묶여 폭증 방지(사라지는 게 아님)
     distribution:
       percentiles-histogram:
         http.server.requests: true    # HTTP 지연 히스토그램 버킷 생성 → Grafana에서 p95/p99 계산 가능
