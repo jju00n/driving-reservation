@@ -19,6 +19,42 @@ services:
     volumes:
       - redis-data:/data
 
+  # 토스 웹훅 수신/처리 분리용 브로커.
+  # KRaft 모드(Zookeeper 없음) 단일 노드 — 학습·로컬 전용이라 replication factor 는 전부 1.
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: driving-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller          # 한 프로세스가 브로커+컨트롤러 겸임(단일 노드)
+      # 리스너 2개: 호스트(앱)는 localhost:9092, 컨테이너끼리(kafka-ui)는 kafka:29092 로 붙는다.
+      # 하나로 하면 둘 중 한쪽이 반드시 못 붙음 — advertised 주소가 접속하는 쪽 기준이라서.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1       # 브로커가 1대뿐이라 복제본을 둘 곳이 없음
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0       # 로컬은 즉시 리밸런스(기본 3초 대기 제거)
+
+  # 토픽/파티션/컨슈머 랙/DLT 메시지를 눈으로 확인하는 용도(운영 필수는 아님)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: driving-kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    depends_on:
+      - kafka
+
   # 메트릭 수집: 앱의 /actuator/prometheus 를 주기적으로 스크래핑
   prometheus:
     image: prom/prometheus:v2.54.1

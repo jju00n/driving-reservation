@@ -4,7 +4,7 @@
   "tags": ["driving", "spring-boot", "micrometer"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "10s",
   "time": { "from": "now-30m", "to": "now" },
   "templating": {
@@ -252,6 +252,123 @@
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "resilience4j_circuitbreaker_buffered_calls{application=\"$application\", name=\"tossPayments\"}",
           "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Kafka 웹훅 파이프라인 (payment.webhook.received)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "panels": []
+    },
+    {
+      "id": 15,
+      "title": "컨슈머 랙 (파티션별 · 밀리면 여기가 쌓인다)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "아직 소비하지 못한 레코드 수. 수신은 계속 200을 주므로 처리가 밀리는 것은 에러가 아니라 여기 숫자로 나타난다. 파티션 키가 orderId 라 특정 파티션만 쌓이면 주문 분포가 치우친 것.",
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 15 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "kafka_consumer_fetch_manager_records_lag{application=\"$application\", topic=\"payment.webhook.received\"}",
+          "legendFormat": "파티션 {{partition}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "발행 vs 소비 (건/s · 벌어지면 컨슈머가 못 따라가는 것)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0, "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(kafka_producer_topic_record_send_total{application=\"$application\", topic=\"payment.webhook.received\"}[1m]))",
+          "legendFormat": "발행(수신 경로)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(kafka_consumer_fetch_manager_records_consumed_total{application=\"$application\", topic=\"payment.webhook.received\"}[1m]))",
+          "legendFormat": "소비(처리 경로)"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "DLT 격리 누적 (0이 정상)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "재시도 3회를 소진하고 payment.webhook.received.DLT 로 격리된 건수. 1건이라도 잡히면 자동 회복이 불가능했다는 뜻이므로 webhook_events 의 FAILED 레코드를 확인해야 한다.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(kafka_producer_topic_record_send_total{application=\"$application\", topic=\"payment.webhook.received.DLT\"}) or vector(0)",
+          "legendFormat": "DLT"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "발행 실패·재시도 (건/s · 브로커 이상 신호)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "발행이 실패하면 webhook_events 가 RECEIVED 로 남고, 재발행 스케줄러가 5분 뒤 회수한다.",
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(kafka_producer_topic_record_error_total{application=\"$application\", topic=\"payment.webhook.received\"}[1m]))",
+          "legendFormat": "발행 실패"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(kafka_producer_topic_record_retry_total{application=\"$application\", topic=\"payment.webhook.received\"}[1m]))",
+          "legendFormat": "프로듀서 재시도"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "오프셋 커밋 지연 (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "처리 성공 후에만 커밋하므로(ack-mode: record), 커밋 지연이 튀면 처리 자체가 느려진 것.",
+      "fieldConfig": { "defaults": { "unit": "ms", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max(kafka_consumer_coordinator_commit_latency_avg{application=\"$application\"})",
+          "legendFormat": "avg"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max(kafka_consumer_coordinator_commit_latency_max{application=\"$application\"})",
+          "legendFormat": "max"
         }
       ]
     }

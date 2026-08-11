@@ -14,6 +14,25 @@ spring:
   security:
     user:
       name: admin
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer   # 값은 JSON 문자열(타입 헤더 의존 없음 → 스키마 변경에 덜 취약)
+      acks: all                    # 리더 + ISR 전부 기록 확인 후 성공 처리(단일 노드라 실효는 리더뿐이지만 의도를 설정으로 남김)
+      properties:
+        enable.idempotence: true   # 프로듀서 재시도 시 브로커가 중복 레코드를 제거(같은 메시지가 두 번 쌓이는 것 방지)
+        delivery.timeout.ms: 5000  # 발행 총 제한. 웹훅 응답 경로라 오래 못 기다림 — 실패분은 재발행 스케줄러가 회수
+        request.timeout.ms: 2000
+    consumer:
+      group-id: webhook-processor
+      auto-offset-reset: earliest      # 그룹 최초 기동 시 처음부터. latest 면 기동 전 쌓인 웹훅을 통째로 건너뜀
+      enable-auto-commit: false        # 핵심: 자동 커밋이면 "처리 전"에 커밋돼 유실 → 아래 ack-mode 로 처리 후 커밋
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record       # 리스너 메서드가 예외 없이 끝난 레코드만 커밋(실패 시 커밋 안 됨 → 재소비)
+      concurrency: 3         # 파티션 수와 동일. 이보다 많이 띄우면 남는 컨슈머는 논다
 
 server:
   shutdown: graceful                  # SIGTERM 수신 시 새 요청 차단 + 처리중 요청 마무리
@@ -55,6 +74,18 @@ springdoc:
     path: /swagger-ui.html
   api-docs:
     path: /api-docs
+
+webhook:
+  kafka:
+    topic: payment.webhook.received
+    partitions: 3              # 컨슈머 병렬도 상한. 파티션 키(orderId) 단위로만 순서가 보장된다
+    retry:
+      attempts: 3              # 컨슈머 처리 실패 시 재시도 횟수(이후 DLT 로 격리)
+      initial-backoff-ms: 1000 # 1초 → 2초 → 4초 (DB 순간 장애 정도는 이걸로 회복)
+      multiplier: 2.0
+  republish:
+    scan-interval-ms: 60000    # 재발행 스케줄러 주기(1분)
+    stale-minutes: 5           # RECEIVED 상태로 5분 이상 잔류 = 발행 실패로 간주하고 재발행
 
 reservation:
   payment-pending-ttl-minutes: 30  # 우리 미결제 만료 정책(토스 결제창 30분과 일치)

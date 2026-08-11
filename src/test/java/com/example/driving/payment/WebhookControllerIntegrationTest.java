@@ -4,6 +4,7 @@ import com.example.driving.member.domain.Member;
 import com.example.driving.member.enums.Role;
 import com.example.driving.member.repository.MemberRepository;
 import com.example.driving.payment.domain.Payment;
+import com.example.driving.payment.domain.WebhookEvent;
 import com.example.driving.payment.enums.PaymentStatus;
 import com.example.driving.payment.enums.WebhookEventStatus;
 import com.example.driving.payment.repository.PaymentRepository;
@@ -27,16 +28,24 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * 토스 웹훅 수신 통합 테스트 — PAYMENT_STATUS_CHANGED(EXPIRED) 수신 시 예약 만료 + 재고 복구,
  * 중복 수신 멱등, 인증 불필요(permitAll)를 검증한다.
+ *
+ * <p><b>비동기 주의:</b> 수신(200 응답)과 처리(Kafka 컨슈머)가 분리돼 있어 POST 직후에는 아직
+ * 상태가 안 바뀌었을 수 있다. 모든 검증은 {@link #awaitProcessed}로 처리 완료를 기다린 뒤에 한다.
+ * "변화 없음"을 확인하는 케이스도 마찬가지 — 처리를 안 기다리면 아직 처리 전이라 통과해버려서
+ * 테스트가 아무것도 보장하지 못한다.
  */
 @DisplayName("토스 웹훅 수신 통합 테스트")
 class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
@@ -89,6 +98,21 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
                 member.getMemberIdx(), scheduleIdx, program.getProgramIdx(), AMOUNT, orderId));
     }
 
+    /**
+     * 컨슈머가 해당 주문의 웹훅을 모두 처리(PROCESSED)할 때까지 대기.
+     * 의미 처리 대상이 아닌 이벤트도 PROCESSED 로 마킹되므로(재발행 순환 방지) 판정 기준으로 쓸 수 있다.
+     */
+    private void awaitProcessed(int expectedCount) {
+        await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(200))
+                .untilAsserted(() -> {
+                    List<WebhookEvent> events = webhookEventRepository.findByOrderId(orderId);
+                    assertThat(events).hasSize(expectedCount);
+                    assertThat(events)
+                            .extracting(WebhookEvent::getStatus)
+                            .containsOnly(WebhookEventStatus.PROCESSED);
+                });
+    }
+
     private String expiredPayload(String orderId) {
         return """
                 {"eventType":"PAYMENT_STATUS_CHANGED","data":{"orderId":"%s","status":"EXPIRED"}}
@@ -132,6 +156,8 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
                         .content(expiredPayload(orderId)))
                 .andExpect(status().isOk());
 
+        awaitProcessed(1);
+
         assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.EXPIRED);
         assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
@@ -149,6 +175,9 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
                             .content(expiredPayload(orderId)))
                     .andExpect(status().isOk());
         }
+
+        awaitProcessed(3);
+
         // 3번 수신해도 재고는 capacity 까지만(중복 복구 없음)
         assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
                 .isEqualTo(CAPACITY);
@@ -168,6 +197,8 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
                         .content(donePayload))
                 .andExpect(status().isOk());
 
+        awaitProcessed(1); // 처리를 기다려야 "변화 없음"이 의미를 갖는다
+
         assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.PAYMENT_PENDING);
         assertThat(scheduleRepository.findById(scheduleIdx).orElseThrow().getRemaining())
@@ -183,6 +214,8 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(canceledPayload(orderId)))
                 .andExpect(status().isOk());
+
+        awaitProcessed(1);
 
         assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.CANCELLED);
@@ -204,6 +237,8 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
                     .andExpect(status().isOk());
         }
 
+        awaitProcessed(3);
+
         assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())
                 .isEqualTo(ReservationStatus.CANCELLED);
         assertThat(paymentRepository.findByOrderId(orderId).orElseThrow().getStatus())
@@ -221,6 +256,8 @@ class WebhookControllerIntegrationTest extends AbstractIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(canceledPayload(orderId)))
                 .andExpect(status().isOk());
+
+        awaitProcessed(1);
 
         // 우리가 환불 요청한 적 없는 건은 보정 대상 아님 — 상태/재고 불변
         assertThat(reservationRepository.findByOrderId(orderId).orElseThrow().getStatus())

@@ -44,6 +44,11 @@ dependencies {
     // Resilience4j (토스 결제 confirm 서킷브레이커)
     implementation("io.github.resilience4j:resilience4j-spring-boot3:2.3.0")
 
+    // Kafka (토스 웹훅 수신/처리 분리 — 처리 실패분 재시도·DLT 격리)
+    // spring-kafka 단독이 아니라 스타터를 쓴다 — Boot 4는 자동설정이 모듈별로 쪼개져 있어
+    // spring-boot-kafka 가 없으면 KafkaTemplate 자동설정도, Testcontainers @ServiceConnection 도 안 붙는다.
+    implementation("org.springframework.boot:spring-boot-starter-kafka")
+
     // Test
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-security-test")
@@ -52,6 +57,8 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
     testImplementation("org.testcontainers:testcontainers-mysql")
+    testImplementation("org.testcontainers:testcontainers-kafka")
+    testImplementation("org.springframework.kafka:spring-kafka-test")
     // Fixture Monkey - 랜덤 객체 생성으로 다양한 입력(이모지/다국어/경계값) 케이스 검증
     testImplementation("com.navercorp.fixturemonkey:fixture-monkey-starter:1.1.18")
     // WireMock - 토스 외부 API 를 HTTP 레벨로 목킹(서킷브레이커 실제 트립 검증)
