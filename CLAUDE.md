@@ -17,15 +17,17 @@
 - **결제:** 토스페이먼츠 API
 - **문서:** springdoc-openapi 2.8.6 (Swagger UI)
 - **복원력:** Resilience4j 2.3.0
+- **메시징:** Kafka (spring-boot-starter-kafka, KRaft 단일 노드) — 웹훅 수신/처리 분리
 - **빌드:** Gradle (Kotlin DSL)
 
 ## 핵심 학습 목표
 
 1. **Redis 분산락** — 예약 시 재고 동시성 제어
 2. **Resilience4j** — 결제 API 서킷브레이커
-3. **통합 테스트** — TestContainers (MySQL + Redis)
-4. **단위 테스트** — JUnit 5, Mockito
-5. **CI/CD** — Docker + EKS (추후)
+3. **Kafka** — 웹훅 수신/처리 분리, 재시도·DLT, 컨슈머 멱등성
+4. **통합 테스트** — TestContainers (MySQL + Redis + Kafka)
+5. **단위 테스트** — JUnit 5, Mockito
+6. **CI/CD** — Docker + EKS (추후)
 
 ## 도메인 구성
 
@@ -65,11 +67,13 @@ src/main/java/com/example/driving/
 │   ├── controller/
 │   ├── service/
 │   ├── repository/
-│   ├── domain/        # Payment.java, PaymentHistory.java
-│   ├── enums/         # PaymentStatus.java
+│   ├── kafka/         # WebhookEventProducer/Consumer, WebhookDltListener, WebhookMessage
+│   ├── scheduler/     # WebhookRepublishScheduler (발행 유실 회수)
+│   ├── domain/        # Payment.java, PaymentHistory.java, WebhookEvent.java
+│   ├── enums/         # PaymentStatus.java, WebhookEventStatus.java
 │   └── dto/
 └── common/
-    ├── config/        # SecurityConfig, RedisConfig, SwaggerConfig
+    ├── config/        # SecurityConfig, RedisConfig, SwaggerConfig, KafkaConfig
     ├── exception/     # BusinessException, GlobalExceptionHandler
     ├── response/      # ApiResponse
     ├── security/      # JwtProvider, JwtFilter, CustomUserDetailsService
@@ -140,10 +144,35 @@ src/main/java/com/example/driving/
 **처리 전략 (웹훅 1차 + 스케줄러 안전망):**
 | 경로 | 동작 |
 |------|------|
-| 1차: 토스 웹훅 | `PAYMENT_STATUS_CHANGED` 수신 → `data.status == EXPIRED` → `data.orderId`로 예약 조회 → `expire()` + 재고 복구 (실시간) |
+| 1차: 토스 웹훅 | `PAYMENT_STATUS_CHANGED` 수신 → RECEIVED 저장 + Kafka 발행 → 즉시 200. 컨슈머가 `data.status == EXPIRED` 판정 후 `expire()` + 재고 복구 |
 | 2차: 스케줄러 (안전망) | `reservedAt + 40분`(토스 30+10분보다 여유) 초과 PAYMENT_PENDING 건 청소. 웹훅 유실/서버 다운 중 미수신 대비 |
 
-**멱등성:** `webhook_events.order_id` 중복 체크 + `Reservation.expire()`의 상태 가드(`isPaymentPending()`)로 중복 재고 복구 방지.
+**멱등성:** `webhook_events.order_id` 중복 체크 + `Reservation.expire()`의 상태 가드(`isPaymentPending()`)로 중복 재고 복구 방지. Kafka 는 at-least-once 라 중복 소비가 필연인데, 토스 재전송용으로 만든 이 가드가 그대로 쓰인다.
+
+## 웹훅 처리 파이프라인 (Kafka)
+
+수신과 처리를 나눈 이유는 성능이 아니라 **실패한 이벤트를 다시 볼 방법이 없었기 때문**이다. 이전 구조는
+처리 중 예외를 catch 로 삼키고 토스에 200 을 줬다 — 토스는 재전송하지 않고 만료 스케줄러는
+PAYMENT_PENDING 만 훑으므로, 환불 보정 실패 건(`REFUND_REQUESTED` 잔류)은 아무도 다시 집지 않았다.
+
+```
+[톰캣]   컨트롤러 → RECEIVED 저장 → Kafka 발행 → 200 ack
+[컨슈머] poll → process() → 상태 전이 → 성공 시에만 오프셋 커밋
+                    ↓ 실패
+              1s → 2s → 4s 재시도 → 소진 시 DLT + FAILED 마킹
+[스케줄러] RECEIVED 로 5분 이상 잔류 = 발행 유실 → 재발행 (아웃박스 역할)
+```
+
+| 항목 | 값 | 이유 |
+|------|-----|------|
+| 토픽 / 파티션 | `payment.webhook.received` / 3 | |
+| 파티션 키 | `orderId` | 같은 주문만 순서 보장, 다른 주문은 병렬 처리 |
+| `enable-auto-commit` | false + `ack-mode: record` | 자동 커밋은 처리 전에 커밋돼 유실 |
+| 재시도 | 3회 (1s→2s→4s) | DB 순간 장애 정도는 회복. 무한 재시도는 파티션을 막음 |
+| DLT | `payment.webhook.received.DLT` | 자동 회복 불가 건 격리 — 재고/예약은 건드리지 않고 사람이 확인 |
+
+**Kafka 를 쓰지 않는 곳:** 예약 재고 차감(분산락 안에서 동기·원자적으로 — 비동기로 빼면 오버셀),
+결제 confirm(사용자가 결과를 기다림), 재고 복구 자체(트랜잭션 내부).
 
 > 상세 흐름은 `docs/payment-sequence.md` 참고.
 
@@ -222,4 +251,4 @@ ApiResponse.fail("에러 메시지")
 ---
 
 **생성:** 멘토링 10회차 설계 기반 (2026-05-18)
-**최종 업데이트:** 2026-05-29 (ERD를 docs/erd.md로 분리, 진행 상황 섹션 제거 — stale/중복 방지)
+**최종 업데이트:** 2026-08-12 (웹훅 수신/처리 Kafka 분리)

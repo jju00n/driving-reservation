@@ -1,0 +1,15 @@
+# 운영(prod) 프로파일 — 민감정보/접속정보는 전부 환경변수로 주입(k8s ConfigMap/Secret)
+# 로컬(application-local.yml)처럼 값을 파일에 박지 않는다. DB_PASSWORD/JWT_SECRET/TOSS_SECRET_KEY = Secret.
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}       # k8s Secret에서 주입 (파일에 평문 금지)
+  sql:
+    init:
+      mode: never                  # 운영 DB는 사전 프로비저닝 — 앱이 schema.sql/data.sql 실행하지 않음
+
+logging:
+  level:
+    com.example.driving: INFO
+    root: WARN

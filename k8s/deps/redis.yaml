@@ -1,0 +1,66 @@
+# Redis — 여기만 Deployment 로 둔다(MySQL/Kafka 는 StatefulSet).
+#
+# 이 프로젝트에서 Redis 가 들고 있는 것은 두 가지뿐이다.
+#   1) 예약 분산락(lock:schedule:{id}, lock:payment:{orderId}) — TTL 이 있어 유실돼도 스스로 풀린다
+#   2) 로그아웃 JWT 블랙리스트 — 유실 시 이미 로그아웃한 토큰이 만료 전까지 되살아난다
+# 재고·결제 정합성은 MySQL 의 원자 UPDATE 가 지키므로 Redis 가 날아가도 오버셀은 생기지 않는다.
+# 2번은 실제 손해가 있는 트레이드오프지만(토큰 재사용 창), 사이드 규모에서 영속화 비용보다 낫다고 판단해 감수한다.
+# 운영에서 세션·블랙리스트를 Redis 에 두려면 AOF 켠 StatefulSet 이나 매니지드(ElastiCache)로 가야 한다.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2
+          args: ["--maxmemory", "192mb", "--maxmemory-policy", "noeviction"]
+          # noeviction 인 이유: 락 키가 메모리 압박으로 쫓겨나면 락이 풀린 것과 같아진다.
+          # 그럴 바엔 쓰기를 거부하고 에러를 내는 쪽이 낫다(오버셀보다 예약 실패가 안전).
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"

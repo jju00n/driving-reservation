@@ -34,6 +34,8 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/programs/**").permitAll()
                         .requestMatchers("/payments/webhook").permitAll()
                         .requestMatchers("/swagger-ui/**", "/api-docs/**").permitAll()
+                        // 헬스체크(k8s probe) + 프로메테우스 스크래핑 경로 허용. 운영에선 내부망/별도 포트로 제한 권장
+                        .requestMatchers("/actuator/health/**", "/actuator/info", "/actuator/prometheus").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(new JwtAuthenticationFilter(jwtProvider, stringRedisTemplate),

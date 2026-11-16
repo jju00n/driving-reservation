@@ -8,9 +8,10 @@
 ![MySQL](https://img.shields.io/badge/MySQL-8.x-blue)
 ![Redis](https://img.shields.io/badge/Redis-Redisson-red)
 ![Resilience4j](https://img.shields.io/badge/Resilience4j-2.3-yellowgreen)
+![Kafka](https://img.shields.io/badge/Kafka-KRaft-black)
 
-> ⚠️ **개발 진행 중** — 회원/프로그램/예약 신청(분산락)/결제 승인·웹훅·만료까지 구현 완료.
-> 예약 변경·취소, 어드민은 진행 예정입니다. (하단 [로드맵](#로드맵) 참고)
+> 구현 범위: 회원, 프로그램 조회, 예약 신청(분산락)·상세·취소(환불), 결제 승인·웹훅(Kafka)·만료.
+> 어드민과 EKS 배포는 아직입니다. (하단 [로드맵](#로드맵) 참고)
 
 ---
 
@@ -28,7 +29,7 @@
 - **`tryLock(wait 3s, lease 5s)`** — 임의값이 아니라 UX 임계점(3초)과 실측 DB 작업 시간의 안전 마진(5초)에서 도출. `leaseTime`을 명시해 watchdog 자동 갱신을 끄고 장애 시 자동 복구 보장.
 - **락 키는 `schedule_idx` 단위** — 경합은 같은 좌석을 노리는 서로 다른 사용자 사이에서 발생하므로 회원 단위 락은 의미 없음.
 
-→ 멀티스레드 **동시성 통합 테스트**로 재고 초과 차감이 발생하지 않음을 검증.
+→ 멀티스레드 **동시성 통합 테스트**에 더해, **k6로 정원 5석에 15명·30명(최대 6배)을 동시에 몰아 오버셀 0건**을 실제 HTTP 트래픽으로 확인. ([`k6/README.md`](k6/README.md))
 
 ### 기술적 도전 ② — 결제 복원력 (Resilience4j 서킷브레이커)
 
@@ -36,6 +37,7 @@
 
 - 토스 confirm 호출에 **서킷브레이커**를 적용해, 장애가 누적되면 빠르게 실패(fast-fail)시키고 시스템 전체로 장애가 번지는 것을 차단.
 - **WireMock으로 토스 API를 HTTP 레벨에서 목킹**해 서킷이 실제로 OPEN으로 트립되는지까지 테스트로 검증.
+- 테스트 밖에서도 실측: WireMock standalone에 장애를 걸고 실제 앱에 confirm을 반복 호출 → 실패 5건이 쌓인 직후 OPEN, 이후 요청은 WireMock까지 가지 않고 차단, 5초 뒤 HALF_OPEN에서 성공해 CLOSED 복귀. ([`k6/toss-circuit-breaker-demo.md`](k6/toss-circuit-breaker-demo.md))
 - confirm 트랜잭션을 `@Transactional` 빈으로 분리해 결제 승인/실패 시 상태 전이와 이력 적재의 원자성 확보.
 
 ### 기술적 도전 ③ — 미결제 만료 정책 (웹훅 1차 + 스케줄러 안전망)
@@ -46,6 +48,23 @@
 - **2차 — 스케줄러 안전망**: `reservedAt + 40분` 초과 좀비 예약을 주기적으로 청소 (웹훅 유실/서버 다운 대비).
 - **멱등성**: `webhook_events.order_id` 중복 체크 + `Reservation.expire()`의 상태 가드로, 웹훅과 스케줄러가 같은 건을 처리해도 **재고 중복 복구를 방지**.
 - **재고 복구 단일 책임**: 결제 상태가 아니라 **예약 상태 전이(`fail`/`cancel`/`expire`)에서만** `remaining += 1` 하여 복구 로직을 한 곳에 모음.
+
+### 기술적 도전 ④ — 웹훅 수신/처리 분리 (Kafka)
+
+나눈 이유는 성능이 아니라 **실패한 웹훅을 다시 볼 방법이 없었기 때문**입니다. 이전 구조는 처리 중 예외를 catch로 삼키고 토스에 200을 줬습니다. 토스는 재전송하지 않고 만료 스케줄러는 `PAYMENT_PENDING`만 훑으므로, 환불 보정에 실패한 건(`REFUND_REQUESTED` 잔류)은 아무 경로에도 걸리지 않았습니다.
+
+```
+[수신]     컨트롤러 → webhook_events(RECEIVED) 저장 → Kafka 발행 → 200
+[처리]     컨슈머 → 상태 전이 → 성공한 레코드만 오프셋 커밋
+              └ 실패: 1s → 2s → 4s 재시도 → 소진 시 DLT 격리 + FAILED
+[안전망]   RECEIVED로 5분 넘게 남은 건 = 발행 유실 → 스케줄러가 재발행 (아웃박스 역할)
+```
+
+- **파티션 키 `orderId`**: 같은 주문만 순서를 보장하고 다른 주문은 병렬 처리.
+- **auto-commit off + `ack-mode: record`**: 자동 커밋은 처리 전에 커밋돼 유실되므로, 예외 없이 끝난 레코드만 커밋.
+- **재시도는 3회까지만**: DB 순간 장애 정도만 회복. 무한 재시도는 파티션 전체를 막는다(head-of-line blocking).
+- **컨슈머 멱등성은 새로 만들지 않음**: Kafka at-least-once의 중복 소비는 토스 웹훅 중복 수신과 같은 문제라, 기존 `order_id` 중복 체크 + 상태 가드를 그대로 사용.
+- **Kafka를 쓰지 않는 곳**: 재고 차감(비동기로 빼면 오버셀), 결제 confirm(사용자가 결과를 기다림).
 
 ---
 
@@ -94,11 +113,15 @@ sequenceDiagram
 | Framework | Spring Boot 4.0, Spring Security, Spring Data JDBC |
 | Database | MySQL 8.x |
 | Cache / Lock | Redis (Redisson 분산락) |
+| Messaging | Kafka (KRaft 단일 노드) — 웹훅 수신/처리 분리, 재시도·DLT |
 | Resilience | Resilience4j 2.3 (서킷브레이커) |
 | Auth | JWT (jjwt 0.12.6) + Redis 기반 토큰 블랙리스트/리프레시 |
 | Payment | 토스페이먼츠 API |
 | Docs | springdoc-openapi (Swagger UI) |
-| Test | JUnit 5, Mockito, **TestContainers**(MySQL+Redis), **WireMock**, **Fixture Monkey** |
+| Test | JUnit 5, Mockito, **TestContainers**(MySQL+Redis+Kafka), **WireMock**, **Fixture Monkey**, **k6** |
+| Observability | Prometheus + Grafana (서킷브레이커·Kafka 컨슈머 대시보드) |
+| CI | GitHub Actions — develop/main 대상 PR마다 전체 테스트 |
+| Infra | Docker Compose (로컬), Kubernetes 매니페스트 (kind 로컬 배포 검증) |
 | Build | Gradle (Kotlin DSL) |
 
 **Spring Data JDBC를 택한 이유**: JPA의 영속성 컨텍스트·지연 로딩 등 암묵적 동작을 걷어내고 SQL 실행 시점을 명확히 파악하며 학습하기 위함. (JPA 미사용)
@@ -115,8 +138,10 @@ sequenceDiagram
 | GET | `/programs` | 프로그램 목록 | — |
 | GET | `/programs/{id}` | 프로그램 상세 | — |
 | POST | `/reservations` | 예약 신청 (분산락 + 재고 차감) | ✅ |
+| GET | `/reservations/{id}` | 예약 상세 | ✅ |
+| DELETE | `/reservations/{id}` | 예약 취소 (토스 결제 취소 + 재고 복구) | ✅ |
 | POST | `/payments/confirm` | 결제 승인 | ✅ |
-| POST | `/payments/webhook` | 토스 웹훅 수신 (만료/상태 보정) | — |
+| POST | `/payments/webhook` | 토스 웹훅 수신 → Kafka 발행 (만료/환불 보정) | — |
 
 ---
 
@@ -127,7 +152,7 @@ src/main/java/com/example/driving/
 ├── member/        # 회원 (가입/로그인, JWT)
 ├── program/       # 차량·프로그램·스케줄(재고)
 ├── reservation/   # 예약 신청·만료 스케줄러
-├── payment/       # 토스 연동·결제 승인·웹훅·서킷브레이커
+├── payment/       # 토스 연동·결제 승인·웹훅(Kafka 프로듀서/컨슈머/DLT)·서킷브레이커
 └── common/        # config, security, exception, response
 ```
 
@@ -216,19 +241,29 @@ erDiagram
 
 - **동시성 통합 테스트** — 멀티스레드로 동시 예약/결제 시 재고 초과 차감이 없음을 검증
 - **서킷브레이커 테스트** — WireMock으로 토스 API 장애를 재현해 서킷 트립 검증
-- **웹훅/만료 통합 테스트** — TestContainers(MySQL+Redis)로 실제 인프라 기반 검증
+- **웹훅/만료 통합 테스트** — TestContainers(MySQL+Redis+Kafka)로 실제 인프라 기반 검증. 처리 실패 시 4회 시도 후 DLT 격리, RECEIVED 잔류분 재발행까지 포함
 - **Fixture Monkey** — 이모지/다국어/경계값 등 다양한 입력 자동 생성
 
 ```bash
 ./gradlew test
 ```
 
+### 테스트 밖에서 실측한 것
+
+| 대상 | 방법 | 결과 |
+|------|------|------|
+| 재고 동시성 | k6로 정원 5석에 15명, 30명 동시 예약 | 성공 건수가 정원을 넘지 않음, 오버셀 0건 |
+| 서킷브레이커 | WireMock standalone에 장애 주입 후 실제 confirm 호출 | 실패 5건 직후 OPEN → 차단 → 5초 후 HALF_OPEN → CLOSED |
+| k8s 배포 | kind 단일 노드에 앱·MySQL·Redis·Kafka | 예약 → 웹훅 → 컨슈머 → 만료 → 재고 복구 흐름 확인, 파드 삭제 중 내부 호출 40/40 성공 |
+
+kind로 띄우면서 매니페스트만으로는 안 보이던 결함 3건(Kafka 헤드리스 DNS 교착, MySQL 초기화 한글 이중 인코딩, QoS 오설정)을 고쳤습니다. ([`k8s/README.md`](k8s/README.md))
+
 ---
 
 ## 7. 실행 방법
 
 ```bash
-# 1. MySQL + Redis 기동
+# 1. MySQL + Redis + Kafka + Prometheus/Grafana 기동
 docker-compose up -d
 
 # 2. 로컬 프로파일로 실행
@@ -236,7 +271,12 @@ docker-compose up -d
 
 # 3. Swagger UI
 # http://localhost:8080/swagger-ui.html
+
+# 4. Grafana 대시보드
+# http://localhost:3000
 ```
+
+k8s(kind) 배포 순서는 [`k8s/README.md`](k8s/README.md) 참고.
 
 ---
 
@@ -247,9 +287,14 @@ docker-compose up -d
 - [x] 예약 신청 + Redis 분산락 + 동시성 테스트
 - [x] 토스페이먼츠 결제 승인 + 서킷브레이커
 - [x] 결제 웹훅 + 미결제 만료(웹훅 1차 + 스케줄러 안전망)
-- [ ] 예약 변경 / 취소 (+ 환불)
+- [x] 예약 상세 조회 / 취소 (+ 토스 결제 취소, 환불 보정)
+- [x] 웹훅 수신/처리 Kafka 분리 (재시도·DLT·재발행)
+- [x] 관측성 (Prometheus + Grafana) + k6 실측
+- [x] CI (GitHub Actions PR 테스트)
+- [x] k8s 매니페스트 + kind 로컬 배포 검증
+- [ ] 예약 변경
 - [ ] 어드민 (프로그램·스케줄 관리)
-- [ ] CI/CD (Docker + EKS)
+- [ ] EKS 배포
 
 ---
 
@@ -260,3 +305,6 @@ docker-compose up -d
 | [`docs/payment-sequence.md`](docs/payment-sequence.md) | 결제/웹훅/만료 시퀀스 다이어그램 |
 | [`docs/erd.md`](docs/erd.md) | 데이터 모델 + 인덱스 설계 |
 | [`docs/testcontainers.md`](docs/testcontainers.md) | 통합 테스트 환경 |
+| [`k6/README.md`](k6/README.md) | 분산락 동시성 부하테스트 |
+| [`k6/toss-circuit-breaker-demo.md`](k6/toss-circuit-breaker-demo.md) | 서킷브레이커 실측 기록 |
+| [`k8s/README.md`](k8s/README.md) | kind 배포 순서, 띄우면서 찾은 결함 |

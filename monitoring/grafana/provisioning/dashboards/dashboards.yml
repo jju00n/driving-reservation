@@ -1,0 +1,12 @@
+# 이 폴더(/var/lib/grafana/dashboards)의 JSON 대시보드를 기동 시 자동 로딩
+apiVersion: 1
+
+providers:
+  - name: 'driving-dashboards'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/dashboards
