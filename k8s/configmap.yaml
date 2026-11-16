@@ -13,5 +13,8 @@ data:
   # Redis 접속 — 클러스터 내 Redis 서비스명 기준(예시)
   REDIS_HOST: "redis"
   REDIS_PORT: "6379"
+  # Kafka 브로커 주소 — StatefulSet 이라 파드 이름(kafka-0)이 고정이라 이 주소도 고정된다.
+  # 빠지면 앱이 기본값 localhost:9092 로 붙으려다 컨슈머 기동에 실패한다.
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-0.kafka:9092"
   # 토스 API 엔드포인트(공개 정보 — 키만 Secret)
   TOSS_BASE_URL: "https://api.tosspayments.com"
