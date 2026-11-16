@@ -1,0 +1,133 @@
+# Kafka (KRaft 단일 노드) — StatefulSet.
+#
+# 왜 StatefulSet 인가:
+#   브로커는 로그 디렉토리에 자기 정체성(node id, 클러스터 id, 파티션 오프셋)을 들고 있다.
+#   Deployment 로 띄우면 재생성 때마다 파드 이름이 바뀌어 advertised 주소와 컨트롤러 쿼럼 투표자
+#   주소가 흔들린다. StatefulSet 은 kafka-0 으로 이름이 고정되고 PVC 가 그대로 따라붙는다.
+#
+# compose 와 달라진 점: 리스너를 2개(localhost:9092 + kafka:29092)에서 1개로 줄였다.
+#   compose 는 "호스트에서 붙는 앱"과 "컨테이너에서 붙는 kafka-ui"가 서로 다른 주소를 써야 했지만,
+#   k8s 에서는 붙는 쪽이 전부 클러스터 내부라 advertised 주소가 하나면 된다.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  labels:
+    app: kafka
+spec:
+  clusterIP: None              # headless — kafka-0.kafka 로 파드에 직접 해석
+  # KRaft 브로커는 "기동 중"에 컨트롤러 쿼럼 주소(kafka-0.kafka:9093)로 자기 자신을 DNS 조회한다.
+  # 헤드리스 서비스는 기본적으로 Ready 인 파드만 DNS 에 올리므로, 이 값이 false 면
+  #   DNS 가 떠야 브로커가 뜨고 / 브로커가 떠야 Ready 가 되고 / Ready 여야 DNS 가 뜨는
+  # 교착에 빠져 UnknownHostException 으로 무한 재시도한다. 실제로 밟고 고친 지점.
+  publishNotReadyAddresses: true
+  selector:
+    app: kafka
+  ports:
+    - name: plaintext
+      port: 9092
+      targetPort: 9092
+    - name: controller
+      port: 9093
+      targetPort: 9093
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  labels:
+    app: kafka
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      # apache/kafka 이미지는 uid 1000 으로 실행된다. PVC 는 기본적으로 root 소유로 마운트되므로
+      # fsGroup 을 지정하지 않으면 로그 디렉토리에 쓰지 못하고 기동에 실패한다.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: apache/kafka:3.8.0
+          ports:
+            - containerPort: 9092
+              name: plaintext
+            - containerPort: 9093
+              name: controller
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"        # 단일 노드라 한 프로세스가 겸임
+            - name: CLUSTER_ID
+              value: "5L6g3nShT-eMCtK--X86sw"   # KRaft 는 포맷 시 클러스터 id 가 필요. 고정해야 PVC 재사용 시 불일치가 없다
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+            # 클라이언트가 실제로 접속할 주소. StatefulSet 이름이 고정이라 이 값도 고정된다.
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka-0.kafka:9092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@kafka-0.kafka:9093"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            # 브로커가 1대라 복제본을 둘 곳이 없다. 운영이면 최소 3 + min.insync.replicas=2.
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+            # 기본 힙은 1G. 이 클러스터에 MySQL·Redis·앱 2파드가 같이 올라가므로 512m 로 조인다.
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xmx512m -Xms512m"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+          # 브로커는 포트를 연 뒤에도 메타데이터 로딩이 남아있어 tcpSocket 만으로는 이르다.
+          # API 로 토픽 목록이 조회되면 그때 준비된 것으로 본다.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "768Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1280Mi"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
